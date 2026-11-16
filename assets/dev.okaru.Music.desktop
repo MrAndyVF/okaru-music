@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Valandy
+GenericName=Music Player
+GenericName[es]=Reproductor de música
+Comment=Listen to your music library
+Comment[es]=Escucha tu biblioteca de música
+Keywords=music;audio;player;songs;albums;artists;lyrics;
+Keywords[es]=música;audio;reproductor;canciones;álbumes;artistas;letras;
+Exec=okaru-music
+Icon=multimedia-audio-player
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=dev.okaru.Music
+Terminal=false

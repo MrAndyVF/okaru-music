@@ -1,0 +1,167 @@
+{
+  "apps": {
+    "music": {
+      "title": "Valandy",
+      "search": "Buscar canciones, artistas, álbumes…",
+      "rescan": "Volver a leer la biblioteca",
+      "close": "Cerrar",
+      "albums": "Álbumes",
+      "artists": "Artistas",
+      "songs": "Canciones",
+      "genres": "Géneros",
+      "add-folder": "Agregar carpeta…",
+      "remove-folder": "Quitar {folder} de la biblioteca",
+      "scanning": "Leyendo… {count} archivo",
+      "scanning-plural": "Leyendo… {count} archivos",
+      "empty": {
+        "title": "Tu biblioteca está vacía",
+        "scanning": "Leyendo tu música…",
+        "hint": "Agrega la carpeta donde guardas tu música."
+      },
+      "results": "Resultados",
+      "no-results": "Ninguna canción coincide con la búsqueda.",
+      "song-count": "{count} canción",
+      "song-count-plural": "{count} canciones",
+      "album-count": "{count} álbum",
+      "album-count-plural": "{count} álbumes",
+      "artist-count": "{count} artista",
+      "artist-count-plural": "{count} artistas",
+      "genre-count": "{count} género",
+      "genre-count-plural": "{count} géneros",
+      "minutes": "{minutes} min",
+      "hours": "{hours} h {minutes} min",
+      "unknown-album": "Álbum desconocido",
+      "unknown-artist": "Artista desconocido",
+      "various-artists": "Varios artistas",
+      "back": "Atrás",
+      "play": "Reproducir",
+      "pause": "Pausar",
+      "shuffle": "Aleatorio",
+      "repeat": "Repetir",
+      "previous": "Anterior",
+      "next": "Siguiente",
+      "mute": "Silenciar",
+      "unmute": "Activar sonido",
+      "add-to-queue": "Agregar a la cola",
+      "clear-queue": "Vaciar",
+      "queue-empty": "La cola está vacía. Reproduce un álbum o una canción para empezar.",
+      "nothing-playing": "No hay nada en reproducción",
+      "sort": {
+        "artist": "Artista",
+        "title": "Título",
+        "album": "Álbum",
+        "year": "Año",
+        "duration": "Duración",
+        "added": "Agregadas recientemente",
+        "name": "Nombre",
+        "songs": "Más canciones",
+        "reverse": "Invertir el orden"
+      },
+      "up-next": "A continuación",
+      "lyrics": "Letra",
+      "no-lyrics": "Esta canción no tiene letra.",
+      "show-player": "Mostrar reproductor",
+      "hide-player": "Ocultar reproductor",
+      "searching-lyrics": "Buscando la letra…",
+      "settings": {
+        "title": "Ajustes",
+        "section": {
+          "library": "Biblioteca",
+          "playback": "Reproducción",
+          "lyrics": "Letras",
+          "covers": "Carátulas"
+        },
+        "scan-on-start": {
+          "name": "Buscar cambios al abrir",
+          "hint": "Lee los archivos nuevos o modificados de tus carpetas cada vez que se abre Valandy."
+        },
+        "rebuild": {
+          "name": "Reconstruir la biblioteca",
+          "hint": "Olvida las etiquetas y carátulas guardadas y vuelve a leer todos los archivos. Tu música no se toca.",
+          "action": "Reconstruir"
+        },
+        "crossfade": {
+          "name": "Fundido entre canciones",
+          "hint": "El final de una canción se mezcla con el comienzo de la siguiente.",
+          "off": "Desactivado",
+          "seconds": "{seconds} s"
+        },
+        "gapless": {
+          "name": "Sin silencios entre pistas",
+          "hint": "Sin cortes entre canciones del mismo álbum (en vivo, mezclas)."
+        },
+        "replaygain": {
+          "name": "Normalizar el volumen",
+          "hint": "Usa las etiquetas ReplayGain para que las canciones suenen a un volumen parecido.",
+          "off": "Desactivado",
+          "track": "Por pista",
+          "album": "Por álbum"
+        },
+        "resume": {
+          "name": "Retomar la cola",
+          "hint": "Al abrir Valandy, la cola queda donde la dejaste (en pausa)."
+        },
+        "lyrics": {
+          "hint": "De dónde sale la letra, en orden de prioridad. Gana la primera que tenga la letra de la canción.",
+          "embedded": {
+            "name": "En el archivo",
+            "hint": "La letra guardada en las etiquetas de la canción."
+          },
+          "local": {
+            "name": "Archivo .lrc",
+            "hint": "Un .lrc o .txt con el mismo nombre, junto a la canción."
+          },
+          "online": {
+            "name": "LRCLIB (internet)",
+            "hint": "Base de letras libre, con letra sincronizada para muchas canciones."
+          }
+        },
+        "prefer-synced": {
+          "name": "Preferir letras sincronizadas",
+          "hint": "Si la primera letra encontrada no está sincronizada, sigue buscando en las siguientes fuentes."
+        },
+        "covers": {
+          "hint": "De dónde sale la carátula, en orden de prioridad.",
+          "embedded": {
+            "name": "En el archivo",
+            "hint": "La imagen guardada en las etiquetas de la canción."
+          },
+          "local": {
+            "name": "Imagen de la carpeta",
+            "hint": "cover.jpg, folder.jpg o front.jpg junto a las canciones."
+          },
+          "download": {
+            "name": "Descargar las carátulas que falten",
+            "hint": "Busca los álbumes y canciones sin carátula en MusicBrainz y en Cover Art Archive."
+          }
+        },
+        "move-up": "Más prioridad",
+        "move-down": "Menos prioridad",
+        "privacy": "Las búsquedas en internet solo envían el artista, el álbum y el nombre de la canción. Las letras y carátulas quedan guardadas en tu equipo."
+      },
+      "playlists": "Listas",
+      "favorites": "Favoritas",
+      "like": "Me gusta",
+      "cancel": "Cancelar",
+      "playlist": {
+        "new": "Nueva lista",
+        "rename": "Cambiar nombre",
+        "delete": "Borrar lista",
+        "name": "Nombre de la lista",
+        "create": "Crear",
+        "save": "Guardar",
+        "empty": "Esta lista está vacía. Haz clic derecho en una canción y elige «Agregar a» para sumarla.",
+        "empty-favorites": "Aquí aparecen las canciones que te gustan. Toca el corazón de cualquier canción."
+      },
+      "menu": {
+        "play-next": "Reproducir a continuación",
+        "add-to-queue": "Agregar a la cola",
+        "unlike": "Quitar de Favoritas",
+        "go-to-album": "Ir al álbum",
+        "add-to": "Agregar a «{name}»",
+        "new-playlist": "Nueva lista con esta canción…",
+        "remove-from-playlist": "Quitar de esta lista"
+      }
+    }
+  }
+}
