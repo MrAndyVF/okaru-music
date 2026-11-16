@@ -123,6 +123,8 @@ namespace okaru::music {
     [[nodiscard]] std::string playlistName(const Playlist& list) const;
     void openPlaylist(std::int64_t id);
     void toggleLike(const std::string& path);
+    // Menú «agregar a una lista» de la canción que suena, sobre su botón.
+    void openAddToPlaylist();
 
     void setModel(Model model);
     void rescan();
@@ -175,6 +177,8 @@ namespace okaru::music {
       bool busy = false;
     };
     ServerForm m_serverForm;
+    Button* m_addToButton = nullptr;
+    bool m_menuAbove = false; // el menú se abre hacia arriba (desde la barra de abajo)
     Model m_model;
     MusicState m_state;
     AudioPlayer m_player;
