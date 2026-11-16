@@ -34,6 +34,7 @@ namespace okaru::music {
     constexpr float kAlbumMinWidth = 168.0F;
     constexpr float kAlbumTextHeight = 48.0F;
     constexpr float kDetailCover = 148.0F;
+    constexpr float kLibraryBackScale = 0.96F; // la biblioteca, un poco más atrás, mientras se abre el reproductor
 
     std::string joinDot(const std::vector<std::string>& parts) {
       std::string out;
@@ -546,7 +547,8 @@ namespace okaru::music {
     // Clic a mitad del cierre: vuelve desde donde está, sin esperar a que termine.
     if (open && m_closing && anim != nullptr) {
       m_closing = false;
-      settleFullPlayer(*anim, true, {});
+      m_fullPlayer = true;
+      settleFullPlayer(*anim, true, [this] { hideLibraryUnderPlayer(); });
       return;
     }
     if (open == m_fullPlayer) {
@@ -554,17 +556,30 @@ namespace okaru::music {
     }
     if (!open && anim != nullptr && !m_closing) {
       // Se va deslizándose hacia abajo desde donde esté (también a mitad de la apertura) y vuelve la biblioteca.
+      // La biblioteca ya está construida debajo: se muestra y el reproductor se funde sobre ella.
       m_closing = true;
+      if (m_libraryView != nullptr) {
+        m_libraryView->setVisible(true);
+      }
       settleFullPlayer(*anim, false, [this] {
         m_closing = false;
         m_fullPlayer = false;
-        m_app.requestRebuild();
+        if (m_fullRoot != nullptr) {
+          m_fullRoot->setVisible(false); // sin reconstruir: la escena ya es la de la biblioteca
+        }
+        if (m_playerToggle != nullptr) {
+          m_playerToggle->setGlyph("chevron-up");
+          m_playerToggle->setSelected(false);
+          m_playerToggle->setTooltip(tr("apps.music.show-player"));
+        }
+        m_app.invalidate();
       });
       return;
     }
     m_fullPlayer = open;
     m_scrollQueueToCurrent = open;
     m_animateOpen = open;
+    m_libraryScale = 1.0F;
     m_animateLyrics = open && m_playerTab == PlayerTab::Lyrics;
     m_app.requestRebuild();
   }
@@ -585,19 +600,26 @@ namespace okaru::music {
         m_fullInfo != nullptr ? m_fullInfo->x() : 0.0F,
         m_fullInfo != nullptr ? m_fullInfo->opacity() : 1.0F,
     };
-    const float toY = visible ? m_fullY : m_fullY + 80.0F * s;
+    const float toY = visible ? m_fullY : m_fullY + 56.0F * s;
     const float toAlpha = visible ? 1.0F : 0.0F;
     const auto lerp = [](float a, float b, float t) { return a + (b - a) * t; };
     // Lo que falta recorrer marca la duración: un clic temprano no espera la animación entera.
     const float remaining = std::abs(toAlpha - from.rootAlpha);
-    const float duration = visible ? 160.0F + 280.0F * remaining : 90.0F + 130.0F * std::max(remaining, 0.3F);
+    const float duration = visible ? 160.0F + 280.0F * remaining : 120.0F + 260.0F * std::max(remaining, 0.3F);
+    // La biblioteca de debajo se acerca (96 % → 100 %) mientras el reproductor se va, y se aleja si vuelve.
+    const float fromLibrary = m_libraryScale;
+    const float toLibrary = visible ? kLibraryBackScale : 1.0F;
     anim.animate(
-        0.0F, 1.0F, duration, visible ? Easing::EaseOutBack : Easing::EaseInQuad,
-        [this, from, toY, toAlpha, visible, lerp](float t) {
+        0.0F, 1.0F, duration, visible ? Easing::EaseOutBack : Easing::EaseInOutCubic,
+        [this, from, toY, toAlpha, visible, lerp, fromLibrary, toLibrary](float t) {
           if (m_fullRoot == nullptr) {
             return;
           }
           const float a = std::clamp(t, 0.0F, 1.0F);
+          if (m_libraryView != nullptr) {
+            m_libraryScale = lerp(fromLibrary, toLibrary, a);
+            m_libraryView->setScale(m_libraryScale);
+          }
           m_fullRoot->setPosition(0.0F, lerp(from.rootY, toY, t));
           m_fullRoot->setOpacity(std::clamp(lerp(from.rootAlpha, toAlpha, a), 0.0F, 1.0F));
           if (visible) { // al volver, lo que quedó corrido regresa a su sitio
@@ -617,6 +639,13 @@ namespace okaru::music {
         },
         std::move(done), this
     );
+  }
+
+  void MusicWindow::hideLibraryUnderPlayer() {
+    // Abierto del todo: la biblioteca de debajo no se pinta ni recibe clics.
+    if (m_fullPlayer && !m_closing && m_libraryView != nullptr) {
+      m_libraryView->setVisible(false);
+    }
   }
 
   void MusicWindow::startAnimations() {
@@ -650,7 +679,22 @@ namespace okaru::music {
         m_app.requestFrame();
       };
       apply(0.0F);
-      anim->animate(0.0F, 1.0F, open ? 380.0F : 360.0F, Easing::EaseOutBack, apply, {}, this);
+      anim->animate(
+          0.0F, 1.0F, open ? 380.0F : 360.0F, Easing::EaseOutBack,
+          [this, apply, open](float t) {
+            apply(t);
+            if (open && m_libraryView != nullptr) {
+              m_libraryScale = 1.0F + (kLibraryBackScale - 1.0F) * std::clamp(t, 0.0F, 1.0F);
+              m_libraryView->setScale(m_libraryScale);
+            }
+          },
+          [this, open] {
+            if (open) {
+              hideLibraryUnderPlayer();
+            }
+          },
+          this
+      );
     }
     if (m_animateLyrics && !m_lyricLines.empty()) {
       // Renglón por renglón, cada uno sube con rebote un poco después del anterior.
@@ -740,7 +784,7 @@ namespace okaru::music {
     // El reproductor completo se rehace si cambió la cola o la canción (carátula, letra); el resto solo actualiza
     // la barra de abajo.
     const bool queueChanged = m_playerTab == PlayerTab::Queue
-        && (m_trackAdapter != nullptr ? m_trackAdapter->itemCount() : 0) != m_player.state().queue.size();
+        && (m_queueAdapter != nullptr ? m_queueAdapter->itemCount() : 0) != m_player.state().queue.size();
     if (structural && m_fullPlayer && (queueChanged || m_player.currentItem() != m_fullPlayerItem)) {
       const bool newTrack = m_player.currentItem() != m_fullPlayerItem;
       m_scrollQueueToCurrent = newTrack;
@@ -763,8 +807,10 @@ namespace okaru::music {
       );
       m_nowArtist->setText(track != nullptr ? joinDot({track->artist, track->album}) : "");
       m_nowCover->setCover(track != nullptr ? track->cover : "");
-      if (m_trackList != nullptr) {
-        m_trackList->notifyDataChanged();
+      for (VirtualListView* list : {m_trackList, m_queueList}) {
+        if (list != nullptr) {
+          list->notifyDataChanged();
+        }
       }
     }
     if (m_playButton != nullptr) {
@@ -792,6 +838,9 @@ namespace okaru::music {
 
   std::unique_ptr<Node> MusicWindow::build(float width, float height, float scale) {
     m_trackList = nullptr;
+    m_queueList = nullptr;
+    m_libraryView = nullptr;
+    m_playerToggle = nullptr;
     m_search = nullptr;
     m_nowCover = nullptr;
     m_nowTitle = nullptr;
@@ -818,18 +867,21 @@ namespace okaru::music {
     Node* headerNode = root->addChild(buildHeader(width, scale));
     m_app.setDragNode(headerNode);
 
+    // La biblioteca siempre existe; con el reproductor completo queda debajo, oculta salvo mientras él se anima:
+    // al cerrarlo aparece sin reconstruir nada (sin destello del fondo vacío).
+    auto library = ui::node({.width = width, .height = bodyHeight});
+    library->setPosition(0.0F, header);
+    library->addChild(buildSidebar(bodyHeight, scale));
+    auto content = buildContent(std::max(0.0F, width - sidebar), bodyHeight, scale);
+    content->setPosition(sidebar, 0.0F);
+    library->addChild(std::move(content));
+    m_libraryView = root->addChild(std::move(library));
     if (m_fullPlayer) {
+      m_libraryView->setVisible(m_animateOpen);
       auto full = buildFullPlayer(width, bodyHeight, scale);
       full->setPosition(0.0F, header);
       m_fullY = header;
       m_fullRoot = root->addChild(std::move(full));
-    } else {
-      auto side = buildSidebar(bodyHeight, scale);
-      side->setPosition(0.0F, header);
-      root->addChild(std::move(side));
-      auto content = buildContent(std::max(0.0F, width - sidebar), bodyHeight, scale);
-      content->setPosition(sidebar, header);
-      root->addChild(std::move(content));
     }
     auto now = buildNowPlaying(width, scale);
     now->setPosition(0.0F, height - bottom);
@@ -1520,6 +1572,7 @@ namespace okaru::music {
     );
     bar->addChild(
         ui::button({
+            .out = &m_playerToggle,
             .glyph = m_fullPlayer ? "chevron-down" : "chevron-up",
             .selected = m_fullPlayer,
             .variant = ButtonVariant::Ghost,
@@ -1569,7 +1622,7 @@ namespace okaru::music {
   } // namespace
 
   std::unique_ptr<Node> MusicWindow::buildFullPlayer(float width, float height, float scale) {
-    m_trackAdapter.reset();
+    m_queueAdapter.reset();
     const Track* track = currentTrack();
     const std::string& item = m_player.currentItem();
     m_fullPlayerItem = item;
@@ -1580,6 +1633,8 @@ namespace okaru::music {
     const float side = std::max(0.0F, std::min(leftWidth, height - pad * 2.0F - textBlock));
 
     auto root = ui::node({.width = width, .height = height, .clipChildren = true});
+    // Opaco: al desvanecerse deja ver la biblioteca de debajo, no un fondo vacío.
+    root->addChild(ui::box({.fill = colorSpecFromRole(ColorRole::Surface), .width = width, .height = height}));
     // Fondo: la carátula desenfocada y tenue, como en YouTube Music.
     auto background = std::make_unique<CoverImage>();
     background->setBlur(24);
@@ -1702,16 +1757,16 @@ namespace okaru::music {
     for (std::size_t i = 0; i < queue.size(); ++i) {
       rows.push_back({.track = trackForItem(queue[i]), .item = queue[i], .number = static_cast<int>(i + 1)});
     }
-    m_trackAdapter = std::make_unique<TrackListAdapter>(
+    m_queueAdapter = std::make_unique<TrackListAdapter>(
         std::move(rows), scale,
         [this](std::size_t index) { return static_cast<std::int64_t>(index) == m_player.state().current; },
         [this](std::size_t index) { m_player.playIndex(index); }
     );
     auto list = ui::virtualListView({
-        .out = &m_trackList,
+        .out = &m_queueList,
         .state = &m_queueScroll,
         .contentScale = scale,
-        .adapter = m_trackAdapter.get(),
+        .adapter = m_queueAdapter.get(),
         .width = width,
         .flexGrow = 1.0F,
     });

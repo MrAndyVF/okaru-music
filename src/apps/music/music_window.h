@@ -84,6 +84,7 @@ namespace okaru::music {
     void setFullPlayer(bool open);
     // Entrada con rebote del reproductor completo, de la canción nueva y de la letra (tras construir la escena).
     void startAnimations();
+    void hideLibraryUnderPlayer();
     // Lleva el reproductor completo a visible u oculto desde donde esté ahora (interrumpible).
     void settleFullPlayer(AnimationManager& anim, bool visible, std::function<void()> done);
     void open(Detail detail);
@@ -119,6 +120,8 @@ namespace okaru::music {
     bool m_animateLyrics = false;
     bool m_closing = false;
     Node* m_fullRoot = nullptr;
+    Node* m_libraryView = nullptr; // barra lateral y contenido: debajo del reproductor completo, oculta mientras está abierto
+    Button* m_playerToggle = nullptr;
     Node* m_fullCover = nullptr;
     Node* m_fullInfo = nullptr;
     Node* m_fullPanel = nullptr;
@@ -129,6 +132,7 @@ namespace okaru::music {
     float m_infoX = 0.0F;
     float m_panelX = 0.0F;
     float m_animScale = 1.0F;
+    float m_libraryScale = 1.0F;
     ScrollViewState m_lyricsScroll;
     Library::Progress m_progress;
 
@@ -136,11 +140,13 @@ namespace okaru::music {
     std::unordered_map<std::uint64_t, ScrollViewState> m_scroll;
     std::unordered_map<std::uint32_t, std::vector<std::size_t>> m_sorted; // (vista, orden, invertido) → índices
     std::unique_ptr<TrackListAdapter> m_trackAdapter;
+    std::unique_ptr<TrackListAdapter> m_queueAdapter; // la cola del reproductor completo
     std::unique_ptr<AlbumGridAdapter> m_albumAdapter;
     std::unique_ptr<NameListAdapter> m_nameAdapter;
 
     // Nodos de la escena que se actualizan sin reconstruir.
     VirtualListView* m_trackList = nullptr;
+    VirtualListView* m_queueList = nullptr;
     Input* m_search = nullptr;
     CoverImage* m_nowCover = nullptr;
     Label* m_nowTitle = nullptr;
