@@ -471,65 +471,102 @@ namespace okaru::music {
 
   // ── Bloque de letra ──────────────────────────────────────────────────────────────────────────────
 
-  // Renglones centrados que se acomodan solos en cada maquetado. Cada línea tiene dos versiones dibujadas una sola
-  // vez: la normal y la resaltada (más grande, otro color). Resaltar es un fundido cruzado con escala entre ambas
-  // (solo transformaciones: fluido, sin redibujar texto en cada cuadro) y la altura del renglón pasa de una a otra;
-  // al terminar se ve la resaltada a escala 1, nítida. La entrada mueve cada renglón con su propio desplazamiento.
+  // Renglones centrados. Cada línea tiene dos versiones dibujadas una sola vez: la normal y la resaltada (más
+  // grande, otro color); resaltar es un fundido cruzado con escala entre ambas y la altura del renglón pasa de una a
+  // otra. Las animaciones solo mueven, escalan y funden con medidas ya tomadas (place(), sin maquetar ni redibujar
+  // texto) y piden un cuadro nuevo en cada paso: así el movimiento es continuo. Como en Kopuz, las líneas se
+  // atenúan con la distancia a la que suena, y ese foco también se desplaza de forma continua.
   class LyricsBlock final : public Node {
   public:
-    LyricsBlock(float width, float margin, float gap, float spacer, float fontSize, float bigFontSize, ColorSpec color)
+    LyricsBlock(float width, float margin, float gap, float spacer, float fontSize, float bigFontSize, ColorSpec color, bool depth)
         : m_width(width), m_margin(margin), m_gap(gap), m_spacer(spacer), m_fontSize(fontSize),
-          m_bigFontSize(bigFontSize), m_color(color) {}
+          m_bigFontSize(bigFontSize), m_color(color), m_depth(depth) {}
 
     void addLine(const std::string& text) {
       Line line;
-      line.text = text;
       line.base = static_cast<Label*>(addChild(makeLabel(text, m_fontSize, m_color)));
-      m_lines.push_back(std::move(line));
+      if (m_depth) { // solo la letra sincronizada resalta
+        line.big = static_cast<Label*>(addChild(makeLabel(text, m_bigFontSize, colorSpecFromRole(ColorRole::Primary))));
+      }
+      m_lines.push_back(line);
       m_entries.push_back(false);
     }
     void addSpacer() { m_entries.push_back(true); }
 
     [[nodiscard]] std::size_t lineCount() const noexcept { return m_lines.size(); }
     [[nodiscard]] float centerOf(std::size_t index) const { return m_lines[index].center; }
-    void setOffset(std::size_t index, float dy) {
-      m_lines[index].offset = dy;
-      markLayoutDirty();
-    }
-    void setAlpha(std::size_t index, float alpha) {
-      m_lines[index].alpha = alpha;
-      markLayoutDirty();
-    }
+    [[nodiscard]] bool measured() const noexcept { return m_measured; }
+    void setOffset(std::size_t index, float dy) { m_lines[index].offset = dy; }
+    void setAlpha(std::size_t index, float alpha) { m_lines[index].alpha = alpha; }
     // 0 = normal, 1 = resaltada (con el rebote pasa un poco de 1 y vuelve).
-    void setGrow(std::size_t index, float grow) {
-      Line& line = m_lines[index];
-      line.grow = grow;
-      if (line.big == nullptr && grow > 0.0F) {
-        // La versión resaltada se dibuja la primera vez que hace falta.
-        line.big = static_cast<Label*>(addChild(makeLabel(line.text, m_bigFontSize, colorSpecFromRole(ColorRole::Primary))));
+    void setGrow(std::size_t index, float grow) { m_lines[index].grow = grow; }
+    // Línea alrededor de la cual se atenúan las demás (puede estar entre dos: el foco se desliza). <0 = ninguna.
+    void setAnchor(float anchor) { m_anchor = anchor; }
+
+    // Aplica posición, escala y opacidad con las medidas del último maquetado.
+    void place() {
+      if (!m_measured) {
+        return;
       }
-      markLayoutDirty();
+      const float ratio = m_bigFontSize / m_fontSize;
+      float y = m_margin;
+      std::size_t index = 0;
+      for (const bool spacer : m_entries) {
+        if (spacer) {
+          y += m_spacer;
+          continue;
+        }
+        Line& line = m_lines[index];
+        const float g = line.grow;
+        const float shown = std::clamp(g, 0.0F, 1.0F);
+        const float height = line.baseHeight + (line.bigHeight - line.baseHeight) * g;
+        const float centerY = y + height * 0.5F + line.offset;
+        float fade = 1.0F;
+        if (m_depth && m_anchor >= 0.0F) {
+          fade = 1.0F - std::min(kFadeMax, kFadeStep * std::abs(static_cast<float>(index) - m_anchor));
+        }
+        line.base->setScale(1.0F + (ratio - 1.0F) * g);
+        line.base->setOpacity(line.alpha * fade * (1.0F - shown));
+        line.base->setVisible(shown < 1.0F);
+        line.base->setPosition(std::round((m_width - line.base->width()) * 0.5F), centerY - line.baseHeight * 0.5F);
+        if (line.big != nullptr) {
+          line.big->setScale(1.0F / ratio + (1.0F - 1.0F / ratio) * g);
+          line.big->setOpacity(line.alpha * shown);
+          line.big->setVisible(shown > 0.0F);
+          line.big->setPosition(std::round((m_width - line.big->width()) * 0.5F), centerY - line.bigHeight * 0.5F);
+        }
+        line.center = y + height * 0.5F;
+        y += height + m_gap;
+        ++index;
+      }
+      m_height = y + m_margin;
+      setSize(m_width, m_height);
     }
-    // Tras cada acomodo (ahí ya se sabe dónde quedó la línea resaltada).
+
+    // Tras cada maquetado (ahí ya se sabe dónde quedó la línea resaltada).
     std::function<void()> onArranged;
 
   protected:
     LayoutSize doMeasure(Renderer& renderer, const LayoutConstraints& /*constraints*/) override {
-      arrange(renderer);
+      measure(renderer);
       return {m_width, m_height};
     }
     void doLayout(Renderer& renderer) override {
-      arrange(renderer);
+      measure(renderer);
       if (onArranged) {
         onArranged();
       }
     }
 
   private:
+    static constexpr float kFadeStep = 0.09F; // atenuación por línea de distancia
+    static constexpr float kFadeMax = 0.55F;
+
     struct Line {
-      std::string text;
       Label* base = nullptr;
       Label* big = nullptr;
+      float baseHeight = 0.0F;
+      float bigHeight = 0.0F;
       float grow = 0.0F;
       float offset = 0.0F;
       float alpha = 1.0F;
@@ -547,43 +584,18 @@ namespace okaru::music {
       });
     }
 
-    void arrange(Renderer& renderer) {
-      const float ratio = m_bigFontSize / m_fontSize;
-      float y = m_margin;
-      std::size_t index = 0;
-      for (const bool spacer : m_entries) {
-        if (spacer) {
-          y += m_spacer;
-          continue;
-        }
-        Line& line = m_lines[index++];
+    void measure(Renderer& renderer) {
+      for (Line& line : m_lines) {
         line.base->layout(renderer);
-        const float baseHeight = line.base->height();
-        float bigHeight = baseHeight;
+        line.baseHeight = line.base->height();
+        line.bigHeight = line.baseHeight;
         if (line.big != nullptr) {
           line.big->layout(renderer);
-          bigHeight = line.big->height();
+          line.bigHeight = line.big->height();
         }
-        const float g = line.grow;
-        const float shown = std::clamp(g, 0.0F, 1.0F);
-        const float height = baseHeight + (bigHeight - baseHeight) * g;
-        const float centerY = y + height * 0.5F + line.offset;
-        // La normal crece hacia el tamaño de la resaltada y se desvanece; la resaltada llega desde el tamaño normal.
-        line.base->setScale(1.0F + (ratio - 1.0F) * g);
-        line.base->setOpacity(line.alpha * (1.0F - shown));
-        line.base->setVisible(shown < 1.0F);
-        line.base->setPosition(std::round((m_width - line.base->width()) * 0.5F), centerY - baseHeight * 0.5F);
-        if (line.big != nullptr) {
-          line.big->setScale(1.0F / ratio + (1.0F - 1.0F / ratio) * g);
-          line.big->setOpacity(line.alpha * shown);
-          line.big->setVisible(shown > 0.0F);
-          line.big->setPosition(std::round((m_width - line.big->width()) * 0.5F), centerY - bigHeight * 0.5F);
-        }
-        line.center = y + height * 0.5F;
-        y += height + m_gap;
       }
-      m_height = y + m_margin;
-      setSize(m_width, m_height);
+      m_measured = true;
+      place();
     }
 
     float m_width;
@@ -593,6 +605,9 @@ namespace okaru::music {
     float m_fontSize;
     float m_bigFontSize;
     ColorSpec m_color;
+    bool m_depth;
+    bool m_measured = false;
+    float m_anchor = -1.0F;
     float m_height = 0.0F;
     std::vector<bool> m_entries; // true = separación entre estrofas
     std::vector<Line> m_lines;
@@ -919,7 +934,8 @@ namespace okaru::music {
           m_lyricsBlock->setOffset(i, (1.0F - eased) * 28.0F * s);
           m_lyricsBlock->setAlpha(i, std::clamp(local * 1.8F, 0.0F, 1.0F));
         }
-        m_app.invalidate();
+        m_lyricsBlock->place();
+        m_app.requestFrame();
       };
       apply(0.0F);
       anim->animate(0.0F, total, total, Easing::Linear, apply, {}, &m_lyricLabelOf);
@@ -2102,6 +2118,7 @@ namespace okaru::music {
     m_lyricsView = nullptr;
     m_lyricLabelOf.clear();
     m_lyricIndex = -1;
+    m_lyricAnchor = -1.0F;
     if (m_lyrics.empty()) {
       const Track* track = currentTrack();
       const bool searching = track != nullptr && m_lyricsFetching.contains(lyricsCachePath(*track).string());
@@ -2145,7 +2162,7 @@ namespace okaru::music {
     auto block = std::make_unique<LyricsBlock>(
         width - Style::spaceMd * scale, synced ? 160.0F * scale : Style::spaceMd * scale,
         Style::spaceXs * scale * (synced ? 3.0F : 1.0F), Style::spaceLg * scale, Style::fontSizeTitle * scale,
-        Style::fontSizeTitle * kLyricGrow * scale, color
+        Style::fontSizeTitle * kLyricGrow * scale, color, synced
     );
     for (const LyricLine& lyric : m_lyrics.lines) {
       if (lyric.text.empty()) {
@@ -2173,6 +2190,7 @@ namespace okaru::music {
       anim->cancelForOwner(&m_lyricsScroll);
     }
     m_lyricsScroll.offset = 0.0F;
+    m_lyricAnchor = -1.0F;
     m_lyricIndex = -1;
     m_centerLyric = false;
     m_shrinking = -1;
@@ -2284,25 +2302,34 @@ namespace okaru::music {
     m_scrollFrom = m_lyricsScroll.offset;
     m_lyricT = 0.0F;
     m_centerLyric = true; // sin línea (antes de la primera o entre estrofas) vuelve arriba
-    const auto apply = [this, from, to](float t) {
+    // El foco de atenuación va de donde estaba a la línea nueva; entre estrofas se queda.
+    const float anchorFrom = m_lyricAnchor;
+    const float anchorTo = to >= 0 ? static_cast<float>(to) : (line < 0 ? -1.0F : anchorFrom);
+    const auto apply = [this, from, to, anchorFrom, anchorTo](float t) {
       if (m_lyricsBlock == nullptr) {
         return;
       }
       m_lyricT = t;
+      const float done = std::clamp(t, 0.0F, 1.0F);
       if (from >= 0) {
-        m_lyricsBlock->setGrow(static_cast<std::size_t>(from), 1.0F - std::clamp(t, 0.0F, 1.0F));
+        m_lyricsBlock->setGrow(static_cast<std::size_t>(from), 1.0F - done);
       }
       if (to >= 0) {
         m_lyricsBlock->setGrow(static_cast<std::size_t>(to), t);
       }
-      m_app.invalidate();
+      m_lyricAnchor = anchorFrom < 0.0F || anchorTo < 0.0F ? anchorTo : anchorFrom + (anchorTo - anchorFrom) * done;
+      m_lyricsBlock->setAnchor(m_lyricAnchor);
+      // Todo con medidas ya tomadas y un cuadro nuevo por paso: movimiento continuo.
+      m_lyricsBlock->place();
+      centerLyricLine();
+      m_app.requestFrame();
     };
     if (anim == nullptr) {
       apply(1.0F);
       return;
     }
     anim->animate(
-        0.0F, 1.0F, 420.0F, Easing::EaseOutBack, apply,
+        0.0F, 1.0F, 600.0F, Easing::EaseOutBack, apply,
         [this] {
           m_centerLyric = false;
           m_shrinking = -1;
