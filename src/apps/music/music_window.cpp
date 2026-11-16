@@ -446,8 +446,11 @@ namespace okaru::music {
       m_offsets[index] = dy;
       markLayoutDirty();
     }
-    void setBig(std::size_t index, bool big) {
-      m_labels[index]->setFontSize(big ? m_bigFontSize : m_fontSize);
+    // 0 = tamaño normal, 1 = resaltada (admite el rebote: algo más de 1 y vuelve).
+    void setGrow(std::size_t index, float grow) {
+      // En medios píxeles: no rasteriza la fuente en cada fracción.
+      const float size = std::round((m_fontSize + (m_bigFontSize - m_fontSize) * grow) * 2.0F) * 0.5F;
+      m_labels[index]->setFontSize(std::max(m_fontSize, size));
       markLayoutDirty();
     }
     // Tras cada acomodo (ahí ya se sabe dónde quedó la línea resaltada).
@@ -1967,11 +1970,33 @@ namespace okaru::music {
     }
   }
 
+  double MusicWindow::estimatedPosition() const {
+    // mpv avisa la posición cada tanto (en audio, espaciado): entre aviso y aviso se calcula con el reloj.
+    const auto& state = m_player.state();
+    if (state.paused || state.idle) {
+      return state.position;
+    }
+    const double since = std::chrono::duration<double>(std::chrono::steady_clock::now() - m_positionAt).count();
+    return state.position + std::min(since, 1.0);
+  }
+
   void MusicWindow::updateLyricsHighlight() {
+    const auto& state = m_player.state();
+    if (state.position != m_lastPosition) {
+      m_lastPosition = state.position;
+      m_positionAt = std::chrono::steady_clock::now();
+    }
+    // Mientras se ve una letra sincronizada sonando, un reloj propio la mantiene a tiempo.
+    const bool watch = m_lyrics.synced && m_lyricsBlock != nullptr && !state.paused && !state.idle;
+    if (watch && !m_lyricsTick.active()) {
+      m_lyricsTick.startRepeating(std::chrono::milliseconds(50), [this] { updateLyricsHighlight(); });
+    } else if (!watch) {
+      m_lyricsTick.stop();
+    }
     if (!m_lyrics.synced || m_lyricsBlock == nullptr || m_lyricLabelOf.size() != m_lyrics.lines.size()) {
       return;
     }
-    const long line = currentLine(m_lyrics, m_player.state().position);
+    const long line = currentLine(m_lyrics, estimatedPosition());
     if (line == m_lyricIndex) {
       return;
     }
@@ -1980,25 +2005,50 @@ namespace okaru::music {
           ? -1
           : m_lyricLabelOf[static_cast<std::size_t>(index)];
     };
-    if (const long old = labelAt(m_lyricIndex); old >= 0) {
-      m_lyricsBlock->line(static_cast<std::size_t>(old))->setColor(colorSpecFromRole(ColorRole::OnSurfaceVariant, kLyricDim));
-      m_lyricsBlock->setBig(static_cast<std::size_t>(old), false);
+    AnimationManager* anim = m_lyricsBlock->animationManager();
+    if (anim != nullptr) {
+      anim->cancelForOwner(&m_lyricIndex); // la transición anterior termina donde iba
     }
+    // La que se va vuelve a su tamaño; la nueva crece con rebote y la letra se desliza a centrarla, en un mismo
+    // movimiento.
+    const long from = labelAt(m_lyricIndex);
+    const long to = labelAt(line);
     m_lyricIndex = line;
-    if (const long now = labelAt(line); now >= 0) {
-      // Más grande y en el color principal: se vuelve a dibujar a ese tamaño (nítida, sin escalar).
-      m_lyricsBlock->line(static_cast<std::size_t>(now))->setColor(colorSpecFromRole(ColorRole::Primary));
-      m_lyricsBlock->setBig(static_cast<std::size_t>(now), true);
-      m_centerLyric = true; // al acomodarse, se desliza para dejarla al centro
+    if (from >= 0) {
+      m_lyricsBlock->line(static_cast<std::size_t>(from))->setColor(colorSpecFromRole(ColorRole::OnSurfaceVariant, kLyricDim));
     }
-    m_app.invalidate();
+    if (to >= 0) {
+      m_lyricsBlock->line(static_cast<std::size_t>(to))->setColor(colorSpecFromRole(ColorRole::Primary));
+    }
+    m_scrollFrom = m_lyricsScroll.offset;
+    m_lyricT = 0.0F;
+    m_centerLyric = to >= 0;
+    const auto apply = [this, from, to](float t) {
+      if (m_lyricsBlock == nullptr) {
+        return;
+      }
+      m_lyricT = t;
+      if (from >= 0) {
+        m_lyricsBlock->setGrow(static_cast<std::size_t>(from), 1.0F - std::clamp(t, 0.0F, 1.0F));
+      }
+      if (to >= 0) {
+        m_lyricsBlock->setGrow(static_cast<std::size_t>(to), t);
+      }
+      m_app.invalidate();
+    };
+    if (anim == nullptr) {
+      apply(1.0F);
+      return;
+    }
+    anim->animate(0.0F, 1.0F, 420.0F, Easing::EaseOutBack, apply, [this] { m_centerLyric = false; }, &m_lyricIndex);
   }
 
   void MusicWindow::centerLyricLine() {
+    // Tras cada acomodo de la transición: la línea resaltada (que va creciendo) se lleva al centro con el mismo
+    // avance de la animación, rebote incluido.
     if (!m_centerLyric || m_lyricsBlock == nullptr || m_lyricsView == nullptr) {
       return;
     }
-    m_centerLyric = false;
     const long label = m_lyricIndex >= 0 && static_cast<std::size_t>(m_lyricIndex) < m_lyricLabelOf.size()
         ? m_lyricLabelOf[static_cast<std::size_t>(m_lyricIndex)]
         : -1;
@@ -2007,23 +2057,8 @@ namespace okaru::music {
     }
     const float target =
         std::max(0.0F, m_lyricsBlock->centerOf(static_cast<std::size_t>(label)) - m_lyricsView->height() * 0.5F);
-    const float from = m_lyricsScroll.offset;
-    AnimationManager* anim = m_lyricsView->animationManager();
-    if (anim == nullptr) {
-      m_lyricsView->setScrollOffset(target);
-      return;
-    }
-    anim->cancelForOwner(&m_lyricsScroll);
-    anim->animate(
-        0.0F, 1.0F, 420.0F, Easing::EaseOutCubic,
-        [this, from, target](float t) {
-          if (m_lyricsView != nullptr) {
-            m_lyricsView->setScrollOffset(from + (target - from) * t);
-            m_app.requestFrame();
-          }
-        },
-        {}, &m_lyricsScroll
-    );
+    m_lyricsView->setScrollOffset(m_scrollFrom + (target - m_scrollFrom) * m_lyricT);
+    m_app.requestFrame();
   }
 
   // ── Ajustes ───────────────────────────────────────────────────────────────────────────────────────

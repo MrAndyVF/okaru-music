@@ -14,6 +14,7 @@
 #include "apps/music/online.h"
 #include "ui/controls/scroll_view.h"
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -79,6 +80,7 @@ namespace okaru::music {
     void resolveLyrics();
     void updateLyricsHighlight();
     void centerLyricLine();
+    [[nodiscard]] double estimatedPosition() const;
     // Carátulas que faltan, de internet (si está activo), una a una.
     void fetchMissingCovers();
     [[nodiscard]] std::unique_ptr<Node> buildEmpty(float width, float height, float scale);
@@ -145,6 +147,11 @@ namespace okaru::music {
     Node* m_fullPanel = nullptr;
     LyricsBlock* m_lyricsBlock = nullptr;
     bool m_centerLyric = false;
+    float m_lyricT = 0.0F;     // avance de la transición entre líneas (con rebote pasa de 1)
+    float m_scrollFrom = 0.0F; // desplazamiento al empezar la transición
+    Timer m_lyricsTick;
+    double m_lastPosition = -1.0;
+    std::chrono::steady_clock::time_point m_positionAt;
     float m_fullY = 0.0F;
     float m_coverX = 0.0F;
     float m_infoX = 0.0F;
