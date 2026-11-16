@@ -6,6 +6,7 @@
 #include "core/input/key_symbols.h"
 #include "core/log.h"
 #include "i18n/i18n.h"
+#include "render/animation/animation_manager.h"
 #include "render/core/renderer.h"
 #include "ui/builders.h"
 #include "ui/palette.h"
@@ -419,6 +420,7 @@ namespace okaru::music {
         m_focusSearch = false;
         m_app.focus(m_search->inputArea());
       }
+      startAnimations();
     });
     m_app.setOnClose([this] { saveState(); });
     m_app.setDropCallback([this](std::vector<std::string> paths) {
@@ -540,9 +542,92 @@ namespace okaru::music {
   // ── Navegación y reproducción ─────────────────────────────────────────────────────────────────────
 
   void MusicWindow::setFullPlayer(bool open) {
+    if (open == m_fullPlayer) {
+      return;
+    }
+    AnimationManager* anim = m_fullRoot != nullptr ? m_fullRoot->animationManager() : nullptr;
+    if (!open && anim != nullptr && !m_closing) {
+      // Se va deslizándose hacia abajo y luego vuelve la biblioteca.
+      m_closing = true;
+      anim->cancelForOwner(this);
+      anim->animate(
+          0.0F, 1.0F, 200.0F, Easing::EaseInQuad,
+          [this](float t) {
+            if (m_fullRoot != nullptr) {
+              m_fullRoot->setPosition(0.0F, m_fullY + t * 80.0F * m_animScale);
+              m_fullRoot->setOpacity(1.0F - t);
+              m_app.requestFrame();
+            }
+          },
+          [this] {
+            m_closing = false;
+            m_fullPlayer = false;
+            m_app.requestRebuild();
+          },
+          this
+      );
+      return;
+    }
     m_fullPlayer = open;
     m_scrollQueueToCurrent = open;
+    m_animateOpen = open;
+    m_animateLyrics = open && m_playerTab == PlayerTab::Lyrics;
     m_app.requestRebuild();
+  }
+
+  void MusicWindow::startAnimations() {
+    AnimationManager* anim = m_fullRoot != nullptr ? m_fullRoot->animationManager() : nullptr;
+    if (anim == nullptr) {
+      m_animateOpen = m_animateTrack = m_animateLyrics = false;
+      return;
+    }
+    const float s = m_animScale;
+    if (m_animateOpen || m_animateTrack) {
+      const bool open = m_animateOpen;
+      anim->cancelForOwner(this);
+      const auto apply = [this, open, s](float t) {
+        const float back = 1.0F - t; // con EaseOutBack pasa de 1 y vuelve: el rebote
+        const float alpha = std::clamp(t * 1.6F, 0.0F, 1.0F);
+        if (open && m_fullRoot != nullptr) {
+          m_fullRoot->setPosition(0.0F, m_fullY + back * 70.0F * s);
+          m_fullRoot->setOpacity(alpha);
+        }
+        if (m_fullPanel != nullptr && open) {
+          m_fullPanel->setPosition(m_panelX + back * 90.0F * s, m_fullPanel->y());
+        }
+        if (m_fullCover != nullptr) {
+          m_fullCover->setPosition(m_coverX + back * (open ? -40.0F : 56.0F) * s, m_fullCover->y());
+          m_fullCover->setOpacity(alpha);
+        }
+        if (m_fullInfo != nullptr) {
+          m_fullInfo->setPosition(m_infoX + back * (open ? -40.0F : 72.0F) * s, m_fullInfo->y());
+          m_fullInfo->setOpacity(alpha);
+        }
+        m_app.requestFrame();
+      };
+      apply(0.0F);
+      anim->animate(0.0F, 1.0F, open ? 520.0F : 440.0F, Easing::EaseOutBack, apply, {}, this);
+    }
+    if (m_animateLyrics && !m_lyricLines.empty()) {
+      // Renglón por renglón, cada uno sube con rebote un poco después del anterior.
+      static constexpr float kLine = 460.0F;
+      static constexpr float kStagger = 45.0F;
+      static constexpr std::size_t kStaggered = 24; // los de más abajo entran con el último (no se ven todavía)
+      const float total = kLine + kStagger * static_cast<float>(std::min(m_lyricLines.size(), kStaggered));
+      const auto apply = [this, s](float ms) {
+        for (std::size_t i = 0; i < m_lyricLines.size(); ++i) {
+          const float start = kStagger * static_cast<float>(std::min(i, kStaggered));
+          const float local = std::clamp((ms - start) / kLine, 0.0F, 1.0F);
+          const float eased = applyEasing(Easing::EaseOutBack, local);
+          m_lyricLines[i]->setPosition(m_lyricLines[i]->x(), m_lyricTops[i] + (1.0F - eased) * 28.0F * s);
+          m_lyricLines[i]->setOpacity(std::clamp(local * 1.8F, 0.0F, 1.0F));
+        }
+        m_app.requestFrame();
+      };
+      apply(0.0F);
+      anim->animate(0.0F, total, total, Easing::Linear, apply, {}, &m_lyricLines);
+    }
+    m_animateOpen = m_animateTrack = m_animateLyrics = false;
   }
 
   void MusicWindow::show(View view) {
@@ -613,7 +698,10 @@ namespace okaru::music {
     const bool queueChanged = m_playerTab == PlayerTab::Queue
         && (m_trackAdapter != nullptr ? m_trackAdapter->itemCount() : 0) != m_player.state().queue.size();
     if (structural && m_fullPlayer && (queueChanged || m_player.currentItem() != m_fullPlayerItem)) {
-      m_scrollQueueToCurrent = m_player.currentItem() != m_fullPlayerItem;
+      const bool newTrack = m_player.currentItem() != m_fullPlayerItem;
+      m_scrollQueueToCurrent = newTrack;
+      m_animateTrack = newTrack;
+      m_animateLyrics = newTrack && m_playerTab == PlayerTab::Lyrics;
       m_app.requestRebuild();
       return;
     }
@@ -671,6 +759,10 @@ namespace okaru::music {
     m_positionLabel = nullptr;
     m_durationLabel = nullptr;
     m_shownItem.clear();
+    m_fullRoot = m_fullCover = m_fullInfo = m_fullPanel = nullptr;
+    m_lyricLines.clear();
+    m_lyricTops.clear();
+    m_animScale = scale;
 
     const float header = kHeaderHeight * scale;
     const float bottom = kNowPlayingHeight * scale;
@@ -685,7 +777,8 @@ namespace okaru::music {
     if (m_fullPlayer) {
       auto full = buildFullPlayer(width, bodyHeight, scale);
       full->setPosition(0.0F, header);
-      root->addChild(std::move(full));
+      m_fullY = header;
+      m_fullRoot = root->addChild(std::move(full));
     } else {
       auto side = buildSidebar(bodyHeight, scale);
       side->setPosition(0.0F, header);
@@ -1455,8 +1548,9 @@ namespace okaru::music {
     cover->setSize(side, side);
     cover->setCover(track != nullptr ? track->cover : "");
     const float top = std::round((height - side - textBlock) * 0.5F);
-    cover->setPosition(pad + std::round((leftWidth - side) * 0.5F), top);
-    root->addChild(std::move(cover));
+    m_coverX = pad + std::round((leftWidth - side) * 0.5F);
+    cover->setPosition(m_coverX, top);
+    m_fullCover = root->addChild(std::move(cover));
 
     auto info = ui::column({.align = FlexAlign::Center, .gap = 2.0F * scale, .width = leftWidth});
     info->addChild(
@@ -1483,8 +1577,9 @@ namespace okaru::music {
           })
       );
     }
+    m_infoX = pad;
     info->setPosition(pad, top + side + Style::spaceMd * scale);
-    root->addChild(std::move(info));
+    m_fullInfo = root->addChild(std::move(info));
 
     // Panel: pestañas «A continuación» y «Letra».
     const float panelHeight = std::max(0.0F, height - pad * 2.0F);
@@ -1509,6 +1604,7 @@ namespace okaru::music {
               [this, which] {
                 m_playerTab = which;
                 m_scrollQueueToCurrent = which == PlayerTab::Queue;
+                m_animateLyrics = which == PlayerTab::Lyrics;
                 m_app.requestRebuild();
               },
       });
@@ -1518,8 +1614,9 @@ namespace okaru::music {
     panel->addChild(std::move(tabs));
     const float inner = panelWidth - Style::spaceMd * 2.0F * scale;
     panel->addChild(m_playerTab == PlayerTab::Queue ? buildQueuePanel(inner, scale) : buildLyricsPanel(inner, scale));
-    panel->setPosition(width - panelWidth - pad, pad);
-    root->addChild(std::move(panel));
+    m_panelX = width - panelWidth - pad;
+    panel->setPosition(m_panelX, pad);
+    m_fullPanel = root->addChild(std::move(panel));
     return root;
   }
 
@@ -1614,14 +1711,39 @@ namespace okaru::music {
         .width = width,
         .flexGrow = 1.0F,
     });
-    scroll->content()->addChild(
-        ui::label({
-            .text = lyrics,
-            .fontSize = Style::fontSizeTitle * scale,
-            .fontWeight = FontWeight::Medium,
-            .maxWidth = width - Style::spaceMd * scale,
-        })
-    );
+    // Renglones centrados, cada uno su etiqueta y colocados a mano: así la animación los mueve sin que el layout
+    // los devuelva a su sitio. Las líneas vacías separan estrofas.
+    const float lineWidth = width - Style::spaceMd * scale;
+    const float gap = Style::spaceXs * scale;
+    auto block = ui::node({.width = lineWidth});
+    float y = Style::spaceMd * scale;
+    Renderer* renderer = m_app.renderer();
+    std::size_t start = 0;
+    while (start <= lyrics.size()) {
+      const std::size_t end = std::min(lyrics.find('\n', start), lyrics.size());
+      const std::string text = lyrics.substr(start, end - start);
+      start = end + 1;
+      if (text.empty()) {
+        y += Style::spaceLg * scale;
+        continue;
+      }
+      auto line = ui::label({
+          .text = text,
+          .fontSize = Style::fontSizeTitle * scale,
+          .fontWeight = FontWeight::SemiBold,
+          .maxWidth = lineWidth,
+          .textAlign = TextAlign::Center,
+      });
+      if (renderer != nullptr) {
+        line->layout(*renderer);
+      }
+      line->setPosition(std::round((lineWidth - line->width()) * 0.5F), y);
+      m_lyricTops.push_back(y);
+      y += line->height() + gap;
+      m_lyricLines.push_back(block->addChild(std::move(line)));
+    }
+    block->setSize(lineWidth, y + Style::spaceLg * scale);
+    scroll->content()->addChild(std::move(block));
     return scroll;
   }
 
@@ -1700,7 +1822,12 @@ namespace okaru::music {
     case XKB_KEY_l:
       m_playerTab = event.sym == XKB_KEY_l ? PlayerTab::Lyrics : PlayerTab::Queue;
       m_scrollQueueToCurrent = m_playerTab == PlayerTab::Queue;
-      setFullPlayer(true);
+      m_animateLyrics = m_playerTab == PlayerTab::Lyrics;
+      if (m_fullPlayer) {
+        m_app.requestRebuild();
+      } else {
+        setFullPlayer(true);
+      }
       return true;
     default:
       return false;

@@ -80,6 +80,8 @@ namespace okaru::music {
     void saveState();
     void show(View view);
     void setFullPlayer(bool open);
+    // Entrada con rebote del reproductor completo, de la canción nueva y de la letra (tras construir la escena).
+    void startAnimations();
     void open(Detail detail);
     void back();
     void playTracks(const std::vector<std::size_t>& tracks, std::size_t start, bool shuffle);
@@ -107,6 +109,22 @@ namespace okaru::music {
     std::string m_fullPlayerItem; // canción que muestra el reproductor completo (si cambia, se rehace)
     bool m_scrollQueueToCurrent = false;
     ScrollViewState m_queueScroll;
+    // Animaciones: qué toca animar tras la próxima construcción y los nodos que se mueven.
+    bool m_animateOpen = false;
+    bool m_animateTrack = false;
+    bool m_animateLyrics = false;
+    bool m_closing = false;
+    Node* m_fullRoot = nullptr;
+    Node* m_fullCover = nullptr;
+    Node* m_fullInfo = nullptr;
+    Node* m_fullPanel = nullptr;
+    std::vector<Node*> m_lyricLines;
+    std::vector<float> m_lyricTops;
+    float m_fullY = 0.0F;
+    float m_coverX = 0.0F;
+    float m_infoX = 0.0F;
+    float m_panelX = 0.0F;
+    float m_animScale = 1.0F;
     ScrollViewState m_lyricsScroll;
     Library::Progress m_progress;
 
