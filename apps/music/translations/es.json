@@ -160,7 +160,8 @@
         "go-to-album": "Ir al álbum",
         "add-to": "Agregar a «{name}»",
         "new-playlist": "Nueva lista con esta canción…",
-        "remove-from-playlist": "Quitar de esta lista"
+        "remove-from-playlist": "Quitar de esta lista",
+        "add-to-playlist": "Agregar a una lista"
       }
     }
   }

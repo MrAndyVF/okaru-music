@@ -1045,6 +1045,9 @@ namespace okaru::music {
         m_likeButton->setGlyph(m_playlists.liked(item) ? "heart-filled" : "heart");
         m_likeButton->setEnabled(track != nullptr);
       }
+      if (m_addToButton != nullptr) {
+        m_addToButton->setEnabled(track != nullptr);
+      }
       for (VirtualListView* list : {m_trackList, m_queueList}) {
         if (list != nullptr) {
           list->notifyDataChanged();
@@ -1078,6 +1081,7 @@ namespace okaru::music {
     m_trackList = nullptr;
     m_queueList = nullptr;
     m_likeButton = nullptr;
+    m_addToButton = nullptr;
     m_dialogInput = nullptr;
     m_libraryView = nullptr;
     m_playerToggle = nullptr;
@@ -1793,8 +1797,15 @@ namespace okaru::music {
     // Controles y barra de tiempo.
     auto center = ui::column({.align = FlexAlign::Center, .gap = 2.0F * scale, .flexGrow = 1.0F});
     auto buttons = ui::row({.align = FlexAlign::Center, .gap = Style::spaceXs * scale});
-    // Contrapeso del corazón (a la derecha): así reproducir queda centrado sobre la barra de tiempo.
-    buttons->addChild(ui::node({.width = Style::controlHeight * scale, .height = 1.0F}));
+    // Agregar a una lista (a la izquierda, contrapeso del corazón: reproducir queda centrado sobre la barra).
+    buttons->addChild(ui::button({
+        .out = &m_addToButton,
+        .glyph = "playlist-add",
+        .enabled = currentTrack() != nullptr,
+        .variant = ButtonVariant::Ghost,
+        .tooltip = tr("apps.music.menu.add-to-playlist"),
+        .onClick = [this] { openAddToPlaylist(); },
+    }));
     buttons->addChild(
         ui::button({
             .out = &m_shuffleButton,
@@ -2769,6 +2780,30 @@ namespace okaru::music {
     m_menu = std::move(menu);
     m_menuX = x;
     m_menuY = y;
+    m_menuAbove = false;
+    m_app.requestRebuild();
+  }
+
+  void MusicWindow::openAddToPlaylist() {
+    const std::string item = m_player.currentItem();
+    if (currentTrack() == nullptr || m_addToButton == nullptr) {
+      return;
+    }
+    std::vector<MenuEntry> menu;
+    for (const Playlist& list : m_playlists.all()) {
+      if (!list.favorites) {
+        menu.push_back({tr("apps.music.menu.add-to", "name", list.name), [this, id = list.id, item] { m_playlists.add(id, {item}); }});
+      }
+    }
+    menu.push_back({tr("apps.music.menu.new-playlist"), [this, item] { openDialog(Dialog::NewPlaylist, {item}); }});
+    // Sobre el botón, hacia arriba (está en la barra de abajo).
+    float x = 0.0F;
+    float y = 0.0F;
+    Node::absolutePosition(m_addToButton, x, y);
+    m_menu = std::move(menu);
+    m_menuX = x;
+    m_menuY = y;
+    m_menuAbove = true;
     m_app.requestRebuild();
   }
 
@@ -2800,7 +2835,8 @@ namespace okaru::music {
     );
     const float menuHeight = ContextMenuControl::preferredHeight(entries, entries.size(), scale);
     const float x = std::clamp(m_menuX, 4.0F, std::max(4.0F, width - menuWidth - 4.0F));
-    const float y = std::clamp(m_menuY, 4.0F, std::max(4.0F, height - menuHeight - 4.0F));
+    const float wantedY = m_menuAbove ? m_menuY - menuHeight - 4.0F : m_menuY;
+    const float y = std::clamp(wantedY, 4.0F, std::max(4.0F, height - menuHeight - 4.0F));
     layer->addChild(ui::box({
         .fill = colorSpecFromRole(ColorRole::SurfaceContainerHigh),
         .border = colorSpecFromRole(ColorRole::OutlineVariant),
