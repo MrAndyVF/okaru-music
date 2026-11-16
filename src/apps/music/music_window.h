@@ -1,8 +1,10 @@
 #pragma once
 
-// OKARU: interfaz de Valandy. Cabecera con búsqueda, barra lateral (Álbumes, Artistas, Canciones, Géneros, Cola y
-// las carpetas de música), contenido con listas virtuales (miles de canciones sin trabarse) y abajo la canción que
-// suena. Los cambios del reproductor actualizan la barra de abajo y la fila actual sin reconstruir la escena.
+// OKARU: interfaz de Valandy. Cabecera con búsqueda, barra lateral (Álbumes, Artistas, Canciones, Géneros y las
+// carpetas de música), contenido con listas virtuales (miles de canciones sin trabarse) y abajo la canción que suena.
+// Al tocar la canción de abajo se abre el reproductor a pantalla completa (como YouTube Music): carátula grande y un
+// panel con la cola («A continuación») y la letra. Los cambios del reproductor actualizan la barra de abajo y la fila
+// actual sin reconstruir la escena.
 
 #include "apps/music/audio_player.h"
 #include "apps/music/library.h"
@@ -36,7 +38,9 @@ namespace okaru::music {
   class AlbumGridAdapter;
   class NameListAdapter;
 
-  enum class View : std::uint8_t { Albums, Artists, Songs, Genres, Queue };
+  enum class View : std::uint8_t { Albums, Artists, Songs, Genres };
+  // Pestañas del reproductor a pantalla completa.
+  enum class PlayerTab : std::uint8_t { Queue, Lyrics };
 
   class MusicWindow {
   public:
@@ -55,6 +59,9 @@ namespace okaru::music {
     [[nodiscard]] std::unique_ptr<Node> buildSidebar(float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildContent(float width, float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildNowPlaying(float width, float scale);
+    [[nodiscard]] std::unique_ptr<Node> buildFullPlayer(float width, float height, float scale);
+    [[nodiscard]] std::unique_ptr<Node> buildQueuePanel(float width, float scale);
+    [[nodiscard]] std::unique_ptr<Node> buildLyricsPanel(float width, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildEmpty(float width, float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildTracks(std::vector<std::size_t> tracks, bool numbers, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildAlbums(std::vector<std::size_t> albums, float scale);
@@ -72,6 +79,7 @@ namespace okaru::music {
     void removeFolder(std::size_t index);
     void saveState();
     void show(View view);
+    void setFullPlayer(bool open);
     void open(Detail detail);
     void back();
     void playTracks(const std::vector<std::size_t>& tracks, std::size_t start, bool shuffle);
@@ -94,6 +102,12 @@ namespace okaru::music {
     Detail m_detail;
     std::string m_query;
     bool m_focusSearch = false;
+    bool m_fullPlayer = false;
+    PlayerTab m_playerTab = PlayerTab::Queue;
+    std::string m_fullPlayerItem; // canción que muestra el reproductor completo (si cambia, se rehace)
+    bool m_scrollQueueToCurrent = false;
+    ScrollViewState m_queueScroll;
+    ScrollViewState m_lyricsScroll;
     Library::Progress m_progress;
 
     // Por vista (y detalle): la posición del scroll sobrevive a las reconstrucciones.

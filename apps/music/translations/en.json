@@ -9,7 +9,6 @@
       "artists": "Artists",
       "songs": "Songs",
       "genres": "Genres",
-      "queue": "Queue",
       "folders": "Music folders",
       "add-folder": "Add folder…",
       "remove-folder": "Remove {folder} from the library",
@@ -58,7 +57,12 @@
         "name": "Name",
         "songs": "Most songs",
         "reverse": "Reverse order"
-      }
+      },
+      "up-next": "Up next",
+      "lyrics": "Lyrics",
+      "no-lyrics": "This song has no lyrics.",
+      "show-player": "Show player",
+      "hide-player": "Hide player"
     }
   }
 }

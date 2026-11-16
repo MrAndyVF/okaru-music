@@ -9,7 +9,6 @@
       "artists": "Artistas",
       "songs": "Canciones",
       "genres": "Géneros",
-      "queue": "Cola",
       "folders": "Carpetas de música",
       "add-folder": "Agregar carpeta…",
       "remove-folder": "Quitar {folder} de la biblioteca",
@@ -58,7 +57,12 @@
         "name": "Nombre",
         "songs": "Más canciones",
         "reverse": "Invertir el orden"
-      }
+      },
+      "up-next": "A continuación",
+      "lyrics": "Letra",
+      "no-lyrics": "Esta canción no tiene letra.",
+      "show-player": "Mostrar reproductor",
+      "hide-player": "Ocultar reproductor"
     }
   }
 }
