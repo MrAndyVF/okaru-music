@@ -905,8 +905,11 @@ namespace okaru::music {
   void MusicWindow::back() {
     if (!m_query.empty()) {
       m_query.clear();
-    } else {
+    } else if (m_detail.kind != Detail::Kind::None) {
       m_detail = {};
+    } else if (m_view == View::Playlist) {
+      // Una lista no es un detalle: se vuelve a la vista desde la que se abrió.
+      m_view = m_returnView;
     }
     m_app.requestRebuild();
   }
@@ -1081,24 +1084,29 @@ namespace okaru::music {
   }
 
   std::unique_ptr<Node> MusicWindow::buildHeader(float width, float scale) {
+    // «Valandy» empieza donde los íconos de la barra lateral (su margen + el del botón) y la búsqueda donde empieza
+    // el contenido; con la barra angosta el nombre no cabe y solo queda su hueco.
+    const float edge = (Style::spaceSm + Style::spaceMd) * scale;
+    const float gap = Style::spaceSm * scale;
+    const float sidebar = (m_rail ? kRailWidth : kSidebarWidth) * scale;
+    const float titleWidth = std::max(0.0F, sidebar + Style::spaceLg * scale - edge - gap);
     auto header = ui::row({
         .align = FlexAlign::Center,
-        .gap = Style::spaceSm * scale,
-        .paddingH = Style::spaceMd * scale,
+        .gap = gap,
+        .paddingH = edge,
         .width = width,
         .height = kHeaderHeight * scale,
     });
-    header->addChild(ui::glyph({.glyph = "vinyl", .glyphSize = 22.0F * scale, .color = colorSpecFromRole(ColorRole::Primary)}));
-    header->addChild(
+    header->addChild(ui::row(
+        {.align = FlexAlign::Center, .width = titleWidth},
         ui::label({
-            .text = tr("apps.music.title"),
+            .text = m_rail ? std::string() : tr("apps.music.title"),
             .fontSize = (m_titleFont.empty() ? Style::fontSizeTitle : 30.0F) * scale,
             .fontWeight = m_titleFont.empty() ? FontWeight::SemiBold : FontWeight::Normal,
             .fontFamily = m_titleFont.empty() ? std::optional<std::string>{} : std::optional<std::string>{m_titleFont},
-            .minWidth = m_rail ? 0.0F : (kSidebarWidth - 60.0F) * scale,
-            .visible = !m_rail,
+            .maxLines = 1,
         })
-    );
+    ));
     header->addChild(
         ui::input({
             .out = &m_search,
@@ -2629,6 +2637,9 @@ namespace okaru::music {
     m_fullPlayer = false;
     m_query.clear();
     m_detail = {};
+    if (m_view != View::Playlist) {
+      m_returnView = m_view;
+    }
     m_view = View::Playlist;
     m_playlistId = id;
     m_app.requestRebuild();
@@ -2877,7 +2888,7 @@ namespace okaru::music {
         setFullPlayer(false);
         return true;
       }
-      if (!m_query.empty() || m_detail.kind != Detail::Kind::None) {
+      if (!m_query.empty() || m_detail.kind != Detail::Kind::None || m_view == View::Playlist) {
         back();
         return true;
       }

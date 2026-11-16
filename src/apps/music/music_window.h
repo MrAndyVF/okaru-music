@@ -142,6 +142,7 @@ namespace okaru::music {
     OnlineService m_online;
     Playlists m_playlists;
     std::int64_t m_playlistId = 0; // lista abierta (View::Playlist)
+    View m_returnView = View::Albums; // adónde vuelve «Atrás» desde una lista
     std::vector<MenuEntry> m_menu;
     float m_menuX = 0.0F;
     float m_menuY = 0.0F;
