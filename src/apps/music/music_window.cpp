@@ -500,6 +500,7 @@ namespace okaru::music {
     void setAlpha(std::size_t index, float alpha) { m_lines[index].alpha = alpha; }
     // 0 = normal, 1 = resaltada (con el rebote pasa un poco de 1 y vuelve).
     void setGrow(std::size_t index, float grow) { m_lines[index].grow = grow; }
+    [[nodiscard]] float grow(std::size_t index) const { return m_lines[index].grow; }
     // Línea alrededor de la cual se atenúan las demás (puede estar entre dos: el foco se desliza). <0 = ninguna.
     void setAnchor(float anchor) { m_anchor = anchor; }
 
@@ -859,6 +860,7 @@ namespace okaru::music {
         },
         std::move(done), this
     );
+    m_app.requestFrame(); // va por reloj desde ahora: el primer cuadro, ya
   }
 
   void MusicWindow::hideLibraryUnderPlayer() {
@@ -2192,7 +2194,6 @@ namespace okaru::music {
     m_lyricAnchor = -1.0F;
     m_lyricIndex = -1;
     m_centerLyric = false;
-    m_shrinking = -1;
     m_lastPosition = -1.0;
     // Hasta que mpv avise la posición de la canción nueva, la que tiene es la de la anterior.
     m_stalePosition = m_player.state().position;
@@ -2289,14 +2290,17 @@ namespace okaru::music {
     }
     // La que se va vuelve a su tamaño; la nueva crece con rebote y la letra se desliza a centrarla, en un mismo
     // movimiento.
-    // Una transición interrumpida no deja líneas a medio tamaño.
-    if (m_shrinking >= 0 && static_cast<std::size_t>(m_shrinking) < m_lyricsBlock->lineCount()) {
-      m_lyricsBlock->setGrow(static_cast<std::size_t>(m_shrinking), 0.0F);
-    }
-    const long from = labelAt(m_lyricIndex);
     const long to = labelAt(line);
-    m_shrinking = from;
     m_lyricIndex = line;
+    // Cada línea parte del tamaño que tenga ahora (una transición interrumpida sigue desde donde iba, sin saltos):
+    // las que estaban crecidas vuelven a su tamaño y la nueva crece desde el suyo.
+    std::vector<std::pair<std::size_t, float>> shrinking;
+    for (std::size_t i = 0; i < m_lyricsBlock->lineCount(); ++i) {
+      if (static_cast<long>(i) != to && m_lyricsBlock->grow(i) != 0.0F) {
+        shrinking.emplace_back(i, m_lyricsBlock->grow(i));
+      }
+    }
+    const float growFrom = to >= 0 ? std::clamp(m_lyricsBlock->grow(static_cast<std::size_t>(to)), 0.0F, 1.0F) : 0.0F;
 
     m_scrollFrom = m_lyricsScroll.offset;
     m_lyricT = 0.0F;
@@ -2304,17 +2308,17 @@ namespace okaru::music {
     // El foco de atenuación va de donde estaba a la línea nueva; entre estrofas se queda.
     const float anchorFrom = m_lyricAnchor;
     const float anchorTo = to >= 0 ? static_cast<float>(to) : (line < 0 ? -1.0F : anchorFrom);
-    const auto apply = [this, from, to, anchorFrom, anchorTo](float t) {
+    const auto apply = [this, shrinking, to, growFrom, anchorFrom, anchorTo](float t) {
       if (m_lyricsBlock == nullptr) {
         return;
       }
       m_lyricT = t;
       const float done = std::clamp(t, 0.0F, 1.0F);
-      if (from >= 0) {
-        m_lyricsBlock->setGrow(static_cast<std::size_t>(from), 1.0F - done);
+      for (const auto& [index, start] : shrinking) {
+        m_lyricsBlock->setGrow(index, start * (1.0F - done));
       }
       if (to >= 0) {
-        m_lyricsBlock->setGrow(static_cast<std::size_t>(to), t);
+        m_lyricsBlock->setGrow(static_cast<std::size_t>(to), growFrom + (1.0F - growFrom) * t);
       }
       m_lyricAnchor = anchorFrom < 0.0F || anchorTo < 0.0F ? anchorTo : anchorFrom + (anchorTo - anchorFrom) * done;
       m_lyricsBlock->setAnchor(m_lyricAnchor);
@@ -2328,13 +2332,11 @@ namespace okaru::music {
       return;
     }
     anim->animate(
-        0.0F, 1.0F, 600.0F, Easing::EaseOutBack, apply,
-        [this] {
-          m_centerLyric = false;
-          m_shrinking = -1;
-        },
-        &m_lyricIndex
+        0.0F, 1.0F, 600.0F, Easing::EaseOutBack, apply, [this] { m_centerLyric = false; }, &m_lyricIndex
     );
+    // Las animaciones avanzan por reloj desde ahora: sin un cuadro ya, el primero podía llegar tarde y la transición
+    // aparecía casi terminada (la línea grande «de golpe»).
+    apply(0.0F);
   }
 
   void MusicWindow::centerLyricLine() {
