@@ -138,6 +138,29 @@
         "move-up": "Más prioridad",
         "move-down": "Menos prioridad",
         "privacy": "Las búsquedas en internet solo envían el artista, el álbum y el nombre de la canción. Las letras y carátulas quedan guardadas en tu equipo."
+      },
+      "playlists": "Listas",
+      "favorites": "Favoritas",
+      "like": "Me gusta",
+      "cancel": "Cancelar",
+      "playlist": {
+        "new": "Nueva lista",
+        "rename": "Cambiar nombre",
+        "delete": "Borrar lista",
+        "name": "Nombre de la lista",
+        "create": "Crear",
+        "save": "Guardar",
+        "empty": "Esta lista está vacía. Haz clic derecho en una canción y elige «Agregar a» para sumarla.",
+        "empty-favorites": "Aquí aparecen las canciones que te gustan. Toca el corazón de cualquier canción."
+      },
+      "menu": {
+        "play-next": "Reproducir a continuación",
+        "add-to-queue": "Agregar a la cola",
+        "unlike": "Quitar de Favoritas",
+        "go-to-album": "Ir al álbum",
+        "add-to": "Agregar a «{name}»",
+        "new-playlist": "Nueva lista con esta canción…",
+        "remove-from-playlist": "Quitar de esta lista"
       }
     }
   }

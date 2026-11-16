@@ -3,6 +3,7 @@
 #include "apps/music/library.h"
 #include "apps/music/lyrics.h"
 #include "apps/music/music_state.h"
+#include "apps/music/playlists.h"
 #include "core/deferred_call.h"
 
 #include <cassert>
@@ -184,6 +185,34 @@ namespace {
     fs::remove(path);
   }
 
+  void testPlaylists() {
+    const fs::path path = fs::temp_directory_path() / ("okaru-music-playlists-" + std::to_string(::getpid()) + ".db");
+    fs::remove(path);
+    {
+      Playlists lists(path);
+      assert(lists.all().empty());
+      assert(lists.toggleLike("/m/a.flac")); // nace «Favoritas»
+      assert(lists.all().size() == 1 && lists.all()[0].favorites && lists.liked("/m/a.flac"));
+      assert(lists.toggleLike("/m/b.flac"));
+      assert(lists.all()[0].items.front() == "/m/b.flac"); // la más reciente arriba
+      assert(!lists.toggleLike("/m/a.flac") && !lists.liked("/m/a.flac"));
+      const auto id = lists.create("Viaje");
+      lists.add(id, {"/m/x.flac", "/m/y.flac", "/m/x.flac"}); // sin repetidas
+      assert(lists.find(id)->items.size() == 2);
+      lists.removeItem(id, 0);
+      lists.rename(id, "Ruta");
+      assert(lists.find(id)->items == std::vector<std::string>{"/m/y.flac"});
+    }
+    Playlists reopened(path); // todo quedó guardado
+    assert(reopened.all().size() == 2 && reopened.all()[0].favorites && reopened.all()[1].name == "Ruta");
+    assert(reopened.liked("/m/b.flac") && !reopened.liked("/m/a.flac"));
+    reopened.remove(reopened.all()[1].id);
+    assert(reopened.all().size() == 1);
+    for (const char* suffix : {"", "-wal", "-shm"}) {
+      fs::remove(path.string() + suffix);
+    }
+  }
+
   void testShuffle() {
     const std::vector<std::string> items{"a", "b", "c", "d", "e"};
     const auto out = shuffledWithFirst(items, 3);
@@ -247,6 +276,7 @@ int main() {
   testSort();
   testLyrics();
   testSettings();
+  testPlaylists();
   testShuffle();
   testScan();
   return 0;

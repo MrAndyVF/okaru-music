@@ -138,6 +138,29 @@
         "move-up": "Higher priority",
         "move-down": "Lower priority",
         "privacy": "Searches on the internet send only the artist, album and song name. Lyrics and covers stay saved on your computer."
+      },
+      "playlists": "Playlists",
+      "favorites": "Favorites",
+      "like": "Like",
+      "cancel": "Cancel",
+      "playlist": {
+        "new": "New playlist",
+        "rename": "Rename playlist",
+        "delete": "Delete playlist",
+        "name": "Playlist name",
+        "create": "Create",
+        "save": "Save",
+        "empty": "This playlist is empty. Right-click a song and choose «Add to» to add it.",
+        "empty-favorites": "Songs you like show up here. Tap the heart on any song."
+      },
+      "menu": {
+        "play-next": "Play next",
+        "add-to-queue": "Add to queue",
+        "unlike": "Remove from Favorites",
+        "go-to-album": "Go to album",
+        "add-to": "Add to «{name}»",
+        "new-playlist": "New playlist with this song…",
+        "remove-from-playlist": "Remove from this playlist"
       }
     }
   }

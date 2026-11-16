@@ -18,6 +18,7 @@ executable('okaru-music',
     'src/apps/music/audio_player.cpp',
     'src/apps/music/lyrics.cpp',
     'src/apps/music/online.cpp',
+    'src/apps/music/playlists.cpp',
     'src/apps/music/mpris_server.cpp',
     'src/apps/music/music_state.cpp',
     'src/apps/music/music_window.cpp',
@@ -31,11 +32,13 @@ executable('okaru-music',
 
 # Sus textos, que el núcleo busca en /usr/share/okaru/apps/music/translations.
 install_subdir('apps/music/translations', install_dir: get_option('datadir') / 'okaru' / 'apps' / 'music')
+# Fuente del nombre «Valandy» (Great Vibes, SIL OFL 1.1: su licencia va al lado).
+install_subdir('apps/music/fonts', install_dir: get_option('datadir') / 'okaru' / 'apps' / 'music')
 install_data('assets/dev.okaru.Music.desktop', install_dir: get_option('datadir') / 'applications')
 
 if get_option('tests').allowed()
   test('okaru_music_library', executable('okaru_music_library_test',
-    sources: files('tests/okaru_music_library_test.cpp', 'src/apps/music/audio_player.cpp', 'src/apps/music/lyrics.cpp', 'src/apps/music/music_state.cpp') + _library,
+    sources: files('tests/okaru_music_library_test.cpp', 'src/apps/music/audio_player.cpp', 'src/apps/music/lyrics.cpp', 'src/apps/music/music_state.cpp', 'src/apps/music/playlists.cpp') + _library,
     include_directories: _inc,
     dependencies: _deps,
     cpp_args: _args,

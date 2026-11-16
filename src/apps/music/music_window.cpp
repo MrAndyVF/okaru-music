@@ -2,12 +2,16 @@
 
 #include "apps/common/okaru_app.h"
 #include "apps/common/portal_file_chooser.h"
+#include "core/deferred_call.h"
+#include "core/files/resource_paths.h"
 #include "core/input/key_modifiers.h"
 #include "core/input/key_symbols.h"
 #include "core/log.h"
 #include "i18n/i18n.h"
 #include "render/animation/animation_manager.h"
 #include "render/core/renderer.h"
+#include "render/text/font_registry.h"
+#include "ui/controls/context_menu.h"
 #include "ui/builders.h"
 #include "ui/palette.h"
 #include "ui/style.h"
@@ -17,6 +21,7 @@
 #include <cmath>
 #include <format>
 #include <glib.h>
+#include <linux/input-event-codes.h>
 
 namespace okaru::music {
 
@@ -154,47 +159,71 @@ namespace okaru::music {
         m_playing->setGlyph("player-play");
         m_title = static_cast<Label*>(addChild(std::make_unique<Label>()));
         m_subtitle = static_cast<Label*>(addChild(std::make_unique<Label>()));
+        m_heart = static_cast<Glyph*>(addChild(std::make_unique<Glyph>()));
         m_duration = static_cast<Label*>(addChild(std::make_unique<Label>()));
+        // Una sola zona para toda la fila: izquierdo reproduce (o da «me gusta» sobre el corazón), derecho abre el
+        // menú. El resaltado del puntero lo lleva ella misma.
+        m_area = static_cast<InputArea*>(addChild(std::make_unique<InputArea>()));
+        m_area->setAcceptedButtons(InputArea::buttonMask({BTN_LEFT, BTN_RIGHT}));
+        m_area->setOnEnter([this](const InputArea::PointerData&) { setHover(true); });
+        m_area->setOnLeave([this] { setHover(false); });
+      }
+      void setHover(bool hover) {
+        m_hover = hover;
+        m_background->setFill(
+            m_current ? colorSpecFromRole(ColorRole::Primary, 0.14F)
+                      : (hover ? colorSpecFromRole(ColorRole::OnSurface, 0.08F) : clearColorSpec())
+        );
       }
       Box* m_background = nullptr;
       Label* m_number = nullptr;
       Glyph* m_playing = nullptr;
       Label* m_title = nullptr;
       Label* m_subtitle = nullptr;
+      Glyph* m_heart = nullptr;
       Label* m_duration = nullptr;
+      InputArea* m_area = nullptr;
+      bool m_hover = false;
+      bool m_current = false;
     };
 
   } // namespace
 
+  struct TrackListCallbacks {
+    std::function<bool(std::size_t)> isCurrent;
+    std::function<void(std::size_t)> activate;
+    std::function<bool(std::size_t)> isLiked;
+    std::function<void(std::size_t)> toggleLike;
+    std::function<void(std::size_t, float sceneX, float sceneY)> menu;
+  };
+
   class TrackListAdapter final : public VirtualListAdapter {
   public:
-    TrackListAdapter(
-        std::vector<TrackRowData> rows, float scale, std::function<bool(std::size_t)> isCurrent,
-        std::function<void(std::size_t)> activate
-    )
-        : m_rows(std::move(rows)), m_scale(scale), m_isCurrent(std::move(isCurrent)), m_activate(std::move(activate)) {}
+    TrackListAdapter(std::vector<TrackRowData> rows, float scale, TrackListCallbacks callbacks)
+        : m_rows(std::move(rows)), m_scale(scale), m_callbacks(std::move(callbacks)) {}
 
     [[nodiscard]] std::size_t itemCount() const override { return m_rows.size(); }
-    [[nodiscard]] std::uint64_t itemRevision(std::size_t index) const override { return m_isCurrent(index) ? 1 : 0; }
-    [[nodiscard]] bool itemInteractive(std::size_t /*index*/) const override { return true; }
+    [[nodiscard]] std::uint64_t itemRevision(std::size_t index) const override {
+      return (m_callbacks.isCurrent(index) ? 1U : 0U) | (liked(index) ? 2U : 0U);
+    }
+    // La fila maneja sus propios clics (ver TrackRow).
+    [[nodiscard]] bool itemInteractive(std::size_t /*index*/) const override { return false; }
     [[nodiscard]] float measureItem(Renderer& /*renderer*/, std::size_t /*index*/, float /*width*/) override {
       return kRowHeight * m_scale;
     }
     [[nodiscard]] std::unique_ptr<Node> createItem() override { return std::make_unique<TrackRow>(); }
-    void onActivate(std::size_t index) override { m_activate(index); }
 
-    void bindItem(Renderer& renderer, Node& item, std::size_t index, float width, bool hovered) override {
+    void bindItem(Renderer& renderer, Node& item, std::size_t index, float width, bool /*hovered*/) override {
       auto& row = static_cast<TrackRow&>(item);
       const TrackRowData& data = m_rows[index];
       const float s = m_scale;
       const float height = kRowHeight * s;
-      const bool current = m_isCurrent(index);
+      const bool current = m_callbacks.isCurrent(index);
+      const bool isLiked = liked(index);
       row.setSize(width, height);
       row.m_background->setSize(width, height);
-      row.m_background->setFill(
-          current ? colorSpecFromRole(ColorRole::Primary, 0.14F)
-                  : (hovered ? colorSpecFromRole(ColorRole::OnSurface, 0.08F) : clearColorSpec())
-      );
+      row.m_current = current;
+      row.setHover(row.m_hover);
       const ColorSpec accent = colorSpecFromRole(current ? ColorRole::Primary : ColorRole::OnSurface);
       const ColorSpec muted = colorSpecFromRole(current ? ColorRole::Primary : ColorRole::OnSurfaceVariant);
 
@@ -225,11 +254,22 @@ namespace okaru::music {
       row.m_duration->setColor(muted);
       row.m_duration->layout(renderer);
       const float right = width - Style::spaceMd * s;
+      const float durationWidth = std::max(row.m_duration->width(), 36.0F * s);
       row.m_duration->setPosition(
           std::round(right - row.m_duration->width()), std::round((height - row.m_duration->height()) * 0.5F)
       );
 
-      const float textWidth = std::max(0.0F, right - row.m_duration->width() - Style::spaceMd * s - lead);
+      // Corazón: lleno si tiene «me gusta»; si no, apenas marcado (siempre en el mismo sitio, para darle clic).
+      const float heartSize = 16.0F * s;
+      const float heartX = right - durationWidth - Style::spaceMd * s - heartSize;
+      row.m_heart->setGlyph(isLiked ? "heart-filled" : "heart");
+      row.m_heart->setGlyphSize(heartSize);
+      row.m_heart->setColor(isLiked ? colorSpecFromRole(ColorRole::Primary) : colorSpecFromRole(ColorRole::OnSurfaceVariant, 0.45F));
+      row.m_heart->setVisible(track != nullptr);
+      row.m_heart->layout(renderer);
+      row.m_heart->setPosition(std::round(heartX), std::round((height - row.m_heart->height()) * 0.5F));
+
+      const float textWidth = std::max(0.0F, heartX - Style::spaceMd * s - lead);
       row.m_title->setText(track != nullptr ? track->title : fs::path(data.item).filename().string());
       row.m_title->setFontSize(Style::fontSizeBody * s);
       row.m_title->setFontWeight(FontWeight::SemiBold);
@@ -247,13 +287,30 @@ namespace okaru::music {
       const float top = std::round((height - block) * 0.5F);
       row.m_title->setPosition(lead, top);
       row.m_subtitle->setPosition(lead, top + row.m_title->height() + 2.0F * s);
+
+      row.m_area->setSize(width, height);
+      const float heartLeft = heartX - 8.0F * s;
+      const float heartRight = heartX + heartSize + 8.0F * s;
+      const bool canLike = track != nullptr;
+      row.m_area->setOnClick([this, index, heartLeft, heartRight, canLike](const InputArea::PointerData& pointer) {
+        if (pointer.button == BTN_RIGHT) {
+          if (m_callbacks.menu) {
+            m_callbacks.menu(index, pointer.sceneX, pointer.sceneY);
+          }
+        } else if (canLike && pointer.localX >= heartLeft && pointer.localX <= heartRight) {
+          m_callbacks.toggleLike(index);
+        } else {
+          m_callbacks.activate(index);
+        }
+      });
     }
 
   private:
+    [[nodiscard]] bool liked(std::size_t index) const { return m_callbacks.isLiked && m_callbacks.isLiked(index); }
+
     std::vector<TrackRowData> m_rows;
     float m_scale;
-    std::function<bool(std::size_t)> m_isCurrent;
-    std::function<void(std::size_t)> m_activate;
+    TrackListCallbacks m_callbacks;
   };
 
   // ── Filas de artistas y géneros ──────────────────────────────────────────────────────────────────
@@ -509,12 +566,17 @@ namespace okaru::music {
                         fs::path(FileUtils::stateDir()) / "music.db",
                         fs::path(g_get_user_cache_dir()) / "okaru" / "music" / "covers"
                     ),
-        m_online(app), m_state(loadState(statePath())) {
+        m_online(app), m_playlists(fs::path(FileUtils::stateDir()) / "music-playlists.db"),
+        m_state(loadState(statePath())) {
+    // El nombre «Valandy» va con una fuente de firma propia (Great Vibes, OFL), igual en cualquier sistema.
+    m_titleFont = text::registerFontFile(paths::appDataDir("music") / "fonts" / "GreatVibes-Regular.ttf");
     m_player.setOnChange([this](bool structural) { onPlayerChange(structural); });
     m_app.setBuild([this](float w, float h, float s) { return build(w, h, s); });
     m_app.setKeyHandler([this](const KeyboardEvent& event) { return onKey(event); });
     m_app.setAfterBuild([this] {
-      if (m_focusSearch && m_search != nullptr) {
+      if (m_dialogInput != nullptr) {
+        m_app.focus(m_dialogInput->inputArea());
+      } else if (m_focusSearch && m_search != nullptr) {
         m_focusSearch = false;
         m_app.focus(m_search->inputArea());
       }
@@ -919,6 +981,10 @@ namespace okaru::music {
       );
       m_nowArtist->setText(track != nullptr ? joinDot({track->artist, track->album}) : "");
       m_nowCover->setCover(track != nullptr ? track->cover : "");
+      if (m_likeButton != nullptr) {
+        m_likeButton->setGlyph(m_playlists.liked(item) ? "heart-filled" : "heart");
+        m_likeButton->setEnabled(track != nullptr);
+      }
       for (VirtualListView* list : {m_trackList, m_queueList}) {
         if (list != nullptr) {
           list->notifyDataChanged();
@@ -951,6 +1017,8 @@ namespace okaru::music {
   std::unique_ptr<Node> MusicWindow::build(float width, float height, float scale) {
     m_trackList = nullptr;
     m_queueList = nullptr;
+    m_likeButton = nullptr;
+    m_dialogInput = nullptr;
     m_libraryView = nullptr;
     m_playerToggle = nullptr;
     m_search = nullptr;
@@ -1002,6 +1070,12 @@ namespace okaru::music {
     auto now = buildNowPlaying(width, scale);
     now->setPosition(0.0F, height - bottom);
     root->addChild(std::move(now));
+    if (!m_menu.empty()) {
+      root->addChild(buildMenu(width, height, scale));
+    }
+    if (m_dialog != Dialog::None) {
+      root->addChild(buildDialog(width, height, scale));
+    }
     refreshNowPlaying();
     return root;
   }
@@ -1018,8 +1092,9 @@ namespace okaru::music {
     header->addChild(
         ui::label({
             .text = tr("apps.music.title"),
-            .fontSize = Style::fontSizeTitle * scale,
-            .fontWeight = FontWeight::SemiBold,
+            .fontSize = (m_titleFont.empty() ? Style::fontSizeTitle : 30.0F) * scale,
+            .fontWeight = m_titleFont.empty() ? FontWeight::SemiBold : FontWeight::Normal,
+            .fontFamily = m_titleFont.empty() ? std::optional<std::string>{} : std::optional<std::string>{m_titleFont},
             .minWidth = m_rail ? 0.0F : (kSidebarWidth - 60.0F) * scale,
             .visible = !m_rail,
         })
@@ -1110,7 +1185,34 @@ namespace okaru::music {
       const bool active = m_view == entry.view && m_query.empty();
       side->addChild(entryButton(entry.glyph, entry.key, active, [this, view = entry.view] { show(view); }));
     }
-    side->addChild(ui::node({.flexGrow = 1.0F}));
+    // Listas: Favoritas primero, luego las propias, y crear una nueva.
+    side->addChild(ui::node({.height = Style::spaceMd * scale}));
+    if (!m_rail) {
+      side->addChild(ui::label({
+          .text = tr("apps.music.playlists"),
+          .fontSize = Style::fontSizeCaption * scale,
+          .fontWeight = FontWeight::SemiBold,
+          .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+      }));
+    }
+    auto lists = ui::scrollView({.contentScale = scale, .flexGrow = 1.0F});
+    auto column = ui::column({.align = FlexAlign::Stretch, .gap = 2.0F * scale, .width = (m_rail ? kRailWidth : kSidebarWidth) * scale - Style::spaceSm * 2.0F * scale});
+    for (const Playlist& list : m_playlists.all()) {
+      const bool active = m_view == View::Playlist && m_playlistId == list.id && m_query.empty();
+      const std::string name = playlistName(list);
+      column->addChild(ui::button({
+          .text = m_rail ? std::optional<std::string>{} : std::optional<std::string>{name},
+          .glyph = list.favorites ? "heart" : "playlist",
+          .selected = active,
+          .contentAlign = m_rail ? ButtonContentAlign::Center : ButtonContentAlign::Start,
+          .variant = active ? ButtonVariant::Secondary : ButtonVariant::Ghost,
+          .tooltip = name,
+          .onClick = [this, id = list.id] { openPlaylist(id); },
+      }));
+    }
+    column->addChild(entryButton("playlist-add", "apps.music.playlist.new", false, [this] { openDialog(Dialog::NewPlaylist); }));
+    lists->content()->addChild(std::move(column));
+    side->addChild(std::move(lists));
     const bool settings = m_view == View::Settings && m_query.empty();
     side->addChild(entryButton("settings", "apps.music.settings.title", settings, [this] { show(View::Settings); }));
     return side;
@@ -1161,12 +1263,19 @@ namespace okaru::music {
       rows.push_back({.track = &track, .item = track.path, .number = numbers ? track.number : static_cast<int>(i + 1)});
     }
     auto items = std::make_shared<std::vector<std::size_t>>(std::move(tracks));
+    const std::int64_t playlist = m_view == View::Playlist && m_query.empty() ? m_playlistId : 0;
     m_trackAdapter = std::make_unique<TrackListAdapter>(
         std::move(rows), scale,
-        [this, items](std::size_t index) {
-          return m_model.tracks[(*items)[index]].path == m_player.currentItem();
-        },
-        [this, items](std::size_t index) { playTracks(*items, index, false); }
+        TrackListCallbacks{
+            .isCurrent = [this, items](std::size_t index) { return m_model.tracks[(*items)[index]].path == m_player.currentItem(); },
+            .activate = [this, items](std::size_t index) { playTracks(*items, index, false); },
+            .isLiked = [this, items](std::size_t index) { return m_playlists.liked(m_model.tracks[(*items)[index]].path); },
+            .toggleLike = [this, items](std::size_t index) { toggleLike(m_model.tracks[(*items)[index]].path); },
+            .menu =
+                [this, items, playlist](std::size_t index, float x, float y) {
+                  openSongMenu({m_model.tracks[(*items)[index]].path}, x, y, playlist, index);
+                },
+        }
     );
     return ui::virtualListView({
         .out = &m_trackList,
@@ -1196,7 +1305,7 @@ namespace okaru::music {
 
   std::unique_ptr<Node> MusicWindow::buildDetailHeader(
       const std::string& cover, std::string title, std::string subtitle, std::vector<std::size_t> tracks, float width,
-      float scale
+      float scale, std::unique_ptr<Node> extra
   ) {
     auto header = ui::row({.align = FlexAlign::Center, .gap = Style::spaceLg * scale, .width = width});
     header->addChild(
@@ -1260,6 +1369,9 @@ namespace okaru::music {
             .onClick = [this, shared] { queueTracks(*shared); },
         })
     );
+    if (extra != nullptr) {
+      buttons->addChild(std::move(extra));
+    }
     info->addChild(std::move(buttons));
     header->addChild(std::move(info));
     return header;
@@ -1279,6 +1391,7 @@ namespace okaru::music {
       case View::Genres:
         return {"apps.music.sort.name", "apps.music.sort.songs"};
       case View::Settings:
+      case View::Playlist:
         break;
       }
       return {};
@@ -1308,6 +1421,7 @@ namespace okaru::music {
         order = sortedGenres(m_model, static_cast<NameSort>(sort), reverse);
         break;
       case View::Settings:
+      case View::Playlist:
         break;
       }
       it = m_sorted.emplace(key, std::move(order)).first;
@@ -1515,6 +1629,57 @@ namespace okaru::music {
     }
     case View::Settings:
       break;
+    case View::Playlist: {
+      const Playlist* list = m_playlists.find(m_playlistId);
+      if (list == nullptr) {
+        break;
+      }
+      // Solo las que siguen en la biblioteca, en el orden de la lista.
+      std::vector<std::size_t> tracks;
+      double duration = 0.0;
+      for (const auto& path : list->items) {
+        if (const auto it = m_byPath.find(path); it != m_byPath.end()) {
+          tracks.push_back(it->second);
+          duration += m_model.tracks[it->second].duration;
+        }
+      }
+      std::unique_ptr<Node> extra;
+      if (!list->favorites) {
+        extra = ui::row({.align = FlexAlign::Center, .gap = Style::spaceXs * scale});
+        const std::int64_t id = list->id;
+        extra->addChild(ui::button({
+            .glyph = "pencil",
+            .variant = ButtonVariant::Ghost,
+            .tooltip = tr("apps.music.playlist.rename"),
+            .onClick = [this] { openDialog(Dialog::RenamePlaylist); },
+        }));
+        extra->addChild(ui::button({
+            .glyph = "trash",
+            .variant = ButtonVariant::Ghost,
+            .tooltip = tr("apps.music.playlist.delete"),
+            .onClick =
+                [this, id] {
+                  m_playlists.remove(id);
+                  show(View::Albums);
+                },
+        }));
+      }
+      content->addChild(buildDetailHeader(
+          tracks.empty() ? "" : m_model.tracks[tracks.front()].cover, playlistName(*list),
+          joinDot({trp("apps.music.song-count", static_cast<long>(tracks.size())), tracks.empty() ? "" : totalDuration(duration)}),
+          tracks, inner, scale, std::move(extra)
+      ));
+      if (tracks.empty()) {
+        content->addChild(ui::label({
+            .text = list->favorites ? tr("apps.music.playlist.empty-favorites") : tr("apps.music.playlist.empty"),
+            .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+            .maxWidth = inner,
+        }));
+      } else {
+        content->addChild(buildTracks(std::move(tracks), false, scale));
+      }
+      break;
+    }
     }
     return content;
   }
@@ -1548,6 +1713,7 @@ namespace okaru::music {
     if (showInfo) {
       song->addChild(std::move(info));
     }
+    const std::string current = m_player.currentItem();
     auto songArea = ui::inputArea({
         .tooltip = m_fullPlayer ? tr("apps.music.hide-player") : tr("apps.music.show-player"),
         .onClick = [this](const InputArea::PointerData&) { setFullPlayer(!m_fullPlayer); },
@@ -1558,6 +1724,19 @@ namespace okaru::music {
       songArea->setSize(songNode->width(), songNode->height());
     }
     bar->addChild(std::move(songArea));
+    bar->addChild(ui::button({
+        .out = &m_likeButton,
+        .glyph = m_playlists.liked(current) ? "heart-filled" : "heart",
+        .enabled = currentTrack() != nullptr,
+        .variant = ButtonVariant::Ghost,
+        .tooltip = tr("apps.music.like"),
+        .onClick =
+            [this] {
+              if (currentTrack() != nullptr) {
+                toggleLike(m_player.currentItem());
+              }
+            },
+    }));
 
     // Controles y barra de tiempo.
     auto center = ui::column({.align = FlexAlign::Center, .gap = 2.0F * scale, .flexGrow = 1.0F});
@@ -1833,8 +2012,27 @@ namespace okaru::music {
     }
     m_queueAdapter = std::make_unique<TrackListAdapter>(
         std::move(rows), scale,
-        [this](std::size_t index) { return static_cast<std::int64_t>(index) == m_player.state().current; },
-        [this](std::size_t index) { m_player.playIndex(index); }
+        TrackListCallbacks{
+            .isCurrent = [this](std::size_t index) { return static_cast<std::int64_t>(index) == m_player.state().current; },
+            .activate = [this](std::size_t index) { m_player.playIndex(index); },
+            .isLiked =
+                [this](std::size_t index) {
+                  const auto& items = m_player.state().queue;
+                  return index < items.size() && m_playlists.liked(items[index]);
+                },
+            .toggleLike =
+                [this](std::size_t index) {
+                  if (index < m_player.state().queue.size()) {
+                    toggleLike(m_player.state().queue[index]);
+                  }
+                },
+            .menu =
+                [this](std::size_t index, float x, float y) {
+                  if (index < m_player.state().queue.size()) {
+                    openSongMenu({m_player.state().queue[index]}, x, y);
+                  }
+                },
+        }
     );
     auto list = ui::virtualListView({
         .out = &m_queueList,
@@ -2421,13 +2619,233 @@ namespace okaru::music {
     return scroll;
   }
 
+  // ── Listas, «me gusta» y menú ─────────────────────────────────────────────────────────────────────
+
+  std::string MusicWindow::playlistName(const Playlist& list) const {
+    return list.favorites ? tr("apps.music.favorites") : list.name;
+  }
+
+  void MusicWindow::openPlaylist(std::int64_t id) {
+    m_fullPlayer = false;
+    m_query.clear();
+    m_detail = {};
+    m_view = View::Playlist;
+    m_playlistId = id;
+    m_app.requestRebuild();
+  }
+
+  void MusicWindow::toggleLike(const std::string& path) {
+    const bool first = std::ranges::none_of(m_playlists.all(), &Playlist::favorites);
+    m_playlists.toggleLike(path);
+    if (m_likeButton != nullptr && path == m_player.currentItem()) {
+      m_likeButton->setGlyph(m_playlists.liked(path) ? "heart-filled" : "heart");
+    }
+    // Las filas cambian de corazón; la barra lateral, si recién nació «Favoritas»; la lista, si es la abierta.
+    if (first || (m_view == View::Playlist && m_query.empty())) {
+      m_app.requestRebuild();
+      return;
+    }
+    for (VirtualListView* list : {m_trackList, m_queueList}) {
+      if (list != nullptr) {
+        list->notifyDataChanged();
+      }
+    }
+    m_app.invalidate();
+  }
+
+  void MusicWindow::openSongMenu(std::vector<std::string> paths, float x, float y, std::int64_t playlist, std::size_t index) {
+    if (paths.empty()) {
+      return;
+    }
+    std::vector<MenuEntry> menu;
+    menu.push_back({tr("apps.music.menu.play-next"), [this, paths] { m_player.playNext(paths); }});
+    menu.push_back({tr("apps.music.menu.add-to-queue"), [this, paths] { m_player.append(paths); }});
+    const bool liked = m_playlists.liked(paths.front());
+    menu.push_back({liked ? tr("apps.music.menu.unlike") : tr("apps.music.like"), [this, path = paths.front()] { toggleLike(path); }});
+    if (const auto it = m_byPath.find(paths.front()); it != m_byPath.end()) {
+      const Track& track = m_model.tracks[it->second];
+      for (std::size_t a = 0; a < m_model.albums.size(); ++a) {
+        if (std::ranges::contains(m_model.albums[a].tracks, it->second)) {
+          menu.push_back({tr("apps.music.menu.go-to-album"), [this, a] {
+                            m_fullPlayer = false;
+                            m_view = View::Albums;
+                            open({.kind = Detail::Kind::Album, .index = a});
+                          }});
+          break;
+        }
+      }
+      (void)track;
+    }
+    menu.push_back({.separator = true});
+    for (const Playlist& list : m_playlists.all()) {
+      if (!list.favorites && list.id != playlist) {
+        menu.push_back({tr("apps.music.menu.add-to", "name", list.name), [this, id = list.id, paths] { m_playlists.add(id, paths); }});
+      }
+    }
+    menu.push_back({tr("apps.music.menu.new-playlist"), [this, paths] { openDialog(Dialog::NewPlaylist, paths); }});
+    if (playlist != 0) {
+      menu.push_back({.separator = true});
+      menu.push_back({tr("apps.music.menu.remove-from-playlist"), [this, playlist, index] {
+                        m_playlists.removeItem(playlist, index);
+                        m_app.requestRebuild();
+                      }});
+    }
+    m_menu = std::move(menu);
+    m_menuX = x;
+    m_menuY = y;
+    m_app.requestRebuild();
+  }
+
+  std::unique_ptr<Node> MusicWindow::buildMenu(float width, float height, float scale) {
+    auto layer = ui::node({.width = width, .height = height, .zIndex = 20});
+    // Una pulsación fuera lo cierra (solo una nueva: la suelta del clic que lo abrió no cuenta).
+    layer->addChild(ui::inputArea({
+        .acceptedButtons = InputArea::buttonMask({BTN_LEFT, BTN_RIGHT, BTN_MIDDLE}),
+        .width = width,
+        .height = height,
+        .onPress =
+            [this](const InputArea::PointerData& data) {
+              if (data.pressed) {
+                DeferredCall::callLater([this] {
+                  m_menu.clear();
+                  m_app.requestRebuild();
+                });
+              }
+            },
+    }));
+    std::vector<ContextMenuControlEntry> entries;
+    for (std::size_t i = 0; i < m_menu.size(); ++i) {
+      entries.push_back({.id = static_cast<std::int32_t>(i), .label = m_menu[i].label, .separator = m_menu[i].separator});
+    }
+    Renderer* renderer = m_app.renderer();
+    const float menuWidth = std::clamp(
+        renderer != nullptr ? ContextMenuControl::preferredWidth(*renderer, entries, scale, false) : 240.0F * scale,
+        200.0F * scale, 360.0F * scale
+    );
+    const float menuHeight = ContextMenuControl::preferredHeight(entries, entries.size(), scale);
+    const float x = std::clamp(m_menuX, 4.0F, std::max(4.0F, width - menuWidth - 4.0F));
+    const float y = std::clamp(m_menuY, 4.0F, std::max(4.0F, height - menuHeight - 4.0F));
+    layer->addChild(ui::box({
+        .fill = colorSpecFromRole(ColorRole::SurfaceContainerHigh),
+        .border = colorSpecFromRole(ColorRole::OutlineVariant),
+        .borderWidth = 1.0F,
+        .width = menuWidth,
+        .height = menuHeight,
+        .configure = [x, y](Box& box) { box.setPosition(x, y); },
+    }));
+    auto menu = std::make_unique<ContextMenuControl>();
+    menu->setContentScale(scale);
+    menu->setMenuWidth(menuWidth);
+    menu->setMaxVisible(entries.size());
+    menu->setEntries(std::move(entries));
+    menu->setRedrawCallback([this] { m_app.invalidate(); });
+    menu->setOnActivate([this](const ContextMenuControlEntry& entry) {
+      const auto index = static_cast<std::size_t>(entry.id);
+      DeferredCall::callLater([this, index] {
+        if (index >= m_menu.size()) {
+          return;
+        }
+        auto action = m_menu[index].action;
+        m_menu.clear();
+        m_app.requestRebuild();
+        if (action) {
+          action();
+        }
+      });
+    });
+    menu->setPosition(x, y);
+    menu->setSize(menuWidth, menuHeight);
+    layer->addChild(std::move(menu));
+    return layer;
+  }
+
+  void MusicWindow::openDialog(Dialog dialog, std::vector<std::string> paths) {
+    m_dialog = dialog;
+    m_dialogPaths = std::move(paths);
+    const Playlist* list = m_playlists.find(m_playlistId);
+    m_dialogText = dialog == Dialog::RenamePlaylist && list != nullptr ? list->name : "";
+    m_focusSearch = false;
+    m_app.requestRebuild();
+  }
+
+  void MusicWindow::submitDialog() {
+    std::string name = m_dialogInput != nullptr ? m_dialogInput->value() : m_dialogText;
+    name.erase(0, name.find_first_not_of(' '));
+    name.erase(name.find_last_not_of(' ') + 1);
+    if (name.empty()) {
+      return;
+    }
+    if (m_dialog == Dialog::NewPlaylist) {
+      const std::int64_t id = m_playlists.create(name);
+      if (!m_dialogPaths.empty()) {
+        m_playlists.add(id, m_dialogPaths);
+      }
+      m_dialog = Dialog::None;
+      openPlaylist(id);
+      return;
+    }
+    m_playlists.rename(m_playlistId, name);
+    m_dialog = Dialog::None;
+    m_app.requestRebuild();
+  }
+
+  std::unique_ptr<Node> MusicWindow::buildDialog(float width, float height, float scale) {
+    auto layer = ui::node({.width = width, .height = height, .zIndex = 30});
+    layer->addChild(ui::inputArea({.width = width, .height = height}));
+    layer->addChild(ui::box({.fill = colorSpecFromRole(ColorRole::Scrim, 0.45F), .width = width, .height = height}));
+    const float cardWidth = std::min(420.0F * scale, width - 32.0F * scale);
+    auto card = ui::column({
+        .align = FlexAlign::Stretch,
+        .gap = Style::spaceMd * scale,
+        .padding = Style::spaceLg * scale,
+        .fill = colorSpecFromRole(ColorRole::SurfaceContainerHigh),
+        .width = cardWidth,
+    });
+    card->addChild(ui::label({
+        .text = m_dialog == Dialog::NewPlaylist ? tr("apps.music.playlist.new") : tr("apps.music.playlist.rename"),
+        .fontSize = Style::fontSizeTitle * scale,
+        .fontWeight = FontWeight::SemiBold,
+    }));
+    card->addChild(ui::input({
+        .out = &m_dialogInput,
+        .value = m_dialogText,
+        .placeholder = tr("apps.music.playlist.name"),
+        .onChange = [this](const std::string& value) { m_dialogText = value; },
+        .onSubmit = [this](const std::string&) { DeferredCall::callLater([this] { submitDialog(); }); },
+    }));
+    auto buttons = ui::row({.align = FlexAlign::Center, .justify = FlexJustify::End, .gap = Style::spaceSm * scale, .fillWidth = true});
+    buttons->addChild(ui::button({
+        .text = tr("apps.music.cancel"),
+        .variant = ButtonVariant::Ghost,
+        .onClick =
+            [this] {
+              m_dialog = Dialog::None;
+              m_app.requestRebuild();
+            },
+    }));
+    buttons->addChild(ui::button({
+        .text = m_dialog == Dialog::NewPlaylist ? tr("apps.music.playlist.create") : tr("apps.music.playlist.save"),
+        .variant = ButtonVariant::Primary,
+        .onClick = [this] { submitDialog(); },
+    }));
+    card->addChild(std::move(buttons));
+    if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
+      card->layout(*renderer);
+    }
+    card->setPosition(std::round((width - cardWidth) * 0.5F), std::round((height - card->height()) * 0.4F));
+    layer->addChild(std::move(card));
+    return layer;
+  }
+
   bool MusicWindow::onKey(const KeyboardEvent& event) {
     if (!event.pressed || event.preedit) {
       return false;
     }
     const bool ctrl = (event.modifiers & KeyMod::Ctrl) != 0;
     // Escribiendo en la búsqueda, las teclas sueltas son texto.
-    const bool typing = m_search != nullptr && m_app.input().focusedArea() == m_search->inputArea();
+    const InputArea* focused = m_app.input().focusedArea();
+    const bool typing = (m_search != nullptr && focused == m_search->inputArea())
+        || (m_dialogInput != nullptr && focused == m_dialogInput->inputArea());
     switch (event.sym) {
     case XKB_KEY_q:
     case XKB_KEY_w:
@@ -2447,8 +2865,14 @@ namespace okaru::music {
         m_app.focus(m_search->inputArea());
         return true;
       }
-      return false;
+      break; // sin Ctrl: «me gusta» (más abajo, si no se está escribiendo)
     case XKB_KEY_Escape:
+      if (!m_menu.empty() || m_dialog != Dialog::None) {
+        m_menu.clear();
+        m_dialog = Dialog::None;
+        m_app.requestRebuild();
+        return true;
+      }
       if (m_fullPlayer) {
         setFullPlayer(false);
         return true;
@@ -2497,6 +2921,11 @@ namespace okaru::music {
       return true;
     case XKB_KEY_v:
       setFullPlayer(!m_fullPlayer);
+      return true;
+    case XKB_KEY_f:
+      if (currentTrack() != nullptr) {
+        toggleLike(m_player.currentItem());
+      }
       return true;
     case XKB_KEY_u:
     case XKB_KEY_l:

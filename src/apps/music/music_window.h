@@ -12,6 +12,7 @@
 #include "apps/music/mpris_server.h"
 #include "apps/music/music_state.h"
 #include "apps/music/online.h"
+#include "apps/music/playlists.h"
 #include "ui/controls/scroll_view.h"
 
 #include <chrono>
@@ -46,7 +47,7 @@ namespace okaru::music {
   class AlbumGridAdapter;
   class NameListAdapter;
 
-  enum class View : std::uint8_t { Albums, Artists, Songs, Genres, Settings };
+  enum class View : std::uint8_t { Albums, Artists, Songs, Genres, Settings, Playlist };
   // Pestañas del reproductor a pantalla completa.
   enum class PlayerTab : std::uint8_t { Queue, Lyrics };
 
@@ -86,13 +87,33 @@ namespace okaru::music {
     [[nodiscard]] std::unique_ptr<Node> buildEmpty(float width, float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildTracks(std::vector<std::size_t> tracks, bool numbers, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildAlbums(std::vector<std::size_t> albums, float scale);
-    [[nodiscard]] std::unique_ptr<Node>
-    buildDetailHeader(const std::string& cover, std::string title, std::string subtitle, std::vector<std::size_t> tracks, float width, float scale);
+    [[nodiscard]] std::unique_ptr<Node> buildDetailHeader(
+        const std::string& cover, std::string title, std::string subtitle, std::vector<std::size_t> tracks, float width,
+        float scale, std::unique_ptr<Node> extra = nullptr
+    );
     // Selector de orden y botón para invertirlo de la vista actual (Álbumes, Artistas, Canciones, Géneros).
     [[nodiscard]] std::unique_ptr<Node> buildSortControls(float scale);
     // Índices de la vista actual en el orden elegido (en caché hasta que cambie la biblioteca).
     [[nodiscard]] const std::vector<std::size_t>& sorted();
     [[nodiscard]] bool onKey(const KeyboardEvent& event);
+
+    // Menú de una o varias canciones (clic derecho): siguiente, cola, me gusta, listas. Con `playlist`, también
+    // «quitar de esta lista» (la canción en `index`).
+    struct MenuEntry {
+      std::string label;
+      std::function<void()> action;
+      bool separator = false;
+    };
+    void openSongMenu(std::vector<std::string> paths, float x, float y, std::int64_t playlist = 0, std::size_t index = 0);
+    [[nodiscard]] std::unique_ptr<Node> buildMenu(float width, float height, float scale);
+    // Diálogo con un nombre (nueva lista o renombrar).
+    enum class Dialog : std::uint8_t { None, NewPlaylist, RenamePlaylist };
+    void openDialog(Dialog dialog, std::vector<std::string> paths = {});
+    void submitDialog();
+    [[nodiscard]] std::unique_ptr<Node> buildDialog(float width, float height, float scale);
+    [[nodiscard]] std::string playlistName(const Playlist& list) const;
+    void openPlaylist(std::int64_t id);
+    void toggleLike(const std::string& path);
 
     void setModel(Model model);
     void rescan();
@@ -119,6 +140,17 @@ namespace okaru::music {
     apps::OkaruApp& m_app;
     Library m_library;
     OnlineService m_online;
+    Playlists m_playlists;
+    std::int64_t m_playlistId = 0; // lista abierta (View::Playlist)
+    std::vector<MenuEntry> m_menu;
+    float m_menuX = 0.0F;
+    float m_menuY = 0.0F;
+    Dialog m_dialog = Dialog::None;
+    std::string m_dialogText;
+    std::vector<std::string> m_dialogPaths; // canciones para la lista nueva
+    Input* m_dialogInput = nullptr;
+    std::string m_titleFont; // familia de la fuente de firma del nombre (vacía si no cargó)
+    Button* m_likeButton = nullptr;
     Model m_model;
     MusicState m_state;
     AudioPlayer m_player;
