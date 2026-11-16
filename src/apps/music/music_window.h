@@ -149,6 +149,8 @@ namespace okaru::music {
     bool m_centerLyric = false;
     float m_lyricT = 0.0F;     // avance de la transición entre líneas (con rebote pasa de 1)
     float m_scrollFrom = 0.0F; // desplazamiento al empezar la transición
+    long m_shrinking = -1;
+    double m_stalePosition = -1.0; // posición de la canción anterior, hasta que llegue la de la nueva     // etiqueta que vuelve a su tamaño en la transición en curso
     Timer m_lyricsTick;
     double m_lastPosition = -1.0;
     std::chrono::steady_clock::time_point m_positionAt;

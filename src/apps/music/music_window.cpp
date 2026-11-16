@@ -1922,6 +1922,18 @@ namespace okaru::music {
   void MusicWindow::resolveLyrics() {
     m_lyricsItem = m_player.currentItem();
     m_lyrics = {};
+    // Letra nueva: desde arriba, sin la transición ni el desplazamiento que quedaban de la anterior.
+    if (AnimationManager* anim = m_fullRoot != nullptr ? m_fullRoot->animationManager() : nullptr; anim != nullptr) {
+      anim->cancelForOwner(&m_lyricIndex);
+      anim->cancelForOwner(&m_lyricsScroll);
+    }
+    m_lyricsScroll.offset = 0.0F;
+    m_lyricIndex = -1;
+    m_centerLyric = false;
+    m_shrinking = -1;
+    m_lastPosition = -1.0;
+    // Hasta que mpv avise la posición de la canción nueva, la que tiene es la de la anterior.
+    m_stalePosition = m_player.state().position;
     const Track* track = currentTrack();
     if (track == nullptr) {
       return;
@@ -1996,6 +2008,10 @@ namespace okaru::music {
     if (!m_lyrics.synced || m_lyricsBlock == nullptr || m_lyricLabelOf.size() != m_lyrics.lines.size()) {
       return;
     }
+    if (m_stalePosition >= 0.0 && state.position == m_stalePosition && state.position > 0.5) {
+      return;
+    }
+    m_stalePosition = -1.0;
     const long line = currentLine(m_lyrics, estimatedPosition());
     if (line == m_lyricIndex) {
       return;
@@ -2011,8 +2027,13 @@ namespace okaru::music {
     }
     // La que se va vuelve a su tamaño; la nueva crece con rebote y la letra se desliza a centrarla, en un mismo
     // movimiento.
+    // Una transición interrumpida no deja líneas a medio tamaño.
+    if (m_shrinking >= 0 && static_cast<std::size_t>(m_shrinking) < m_lyricsBlock->lineCount()) {
+      m_lyricsBlock->setGrow(static_cast<std::size_t>(m_shrinking), 0.0F);
+    }
     const long from = labelAt(m_lyricIndex);
     const long to = labelAt(line);
+    m_shrinking = from;
     m_lyricIndex = line;
     if (from >= 0) {
       m_lyricsBlock->line(static_cast<std::size_t>(from))->setColor(colorSpecFromRole(ColorRole::OnSurfaceVariant, kLyricDim));
@@ -2022,7 +2043,7 @@ namespace okaru::music {
     }
     m_scrollFrom = m_lyricsScroll.offset;
     m_lyricT = 0.0F;
-    m_centerLyric = to >= 0;
+    m_centerLyric = true; // sin línea (antes de la primera o entre estrofas) vuelve arriba
     const auto apply = [this, from, to](float t) {
       if (m_lyricsBlock == nullptr) {
         return;
@@ -2040,7 +2061,14 @@ namespace okaru::music {
       apply(1.0F);
       return;
     }
-    anim->animate(0.0F, 1.0F, 420.0F, Easing::EaseOutBack, apply, [this] { m_centerLyric = false; }, &m_lyricIndex);
+    anim->animate(
+        0.0F, 1.0F, 420.0F, Easing::EaseOutBack, apply,
+        [this] {
+          m_centerLyric = false;
+          m_shrinking = -1;
+        },
+        &m_lyricIndex
+    );
   }
 
   void MusicWindow::centerLyricLine() {
@@ -2052,11 +2080,13 @@ namespace okaru::music {
     const long label = m_lyricIndex >= 0 && static_cast<std::size_t>(m_lyricIndex) < m_lyricLabelOf.size()
         ? m_lyricLabelOf[static_cast<std::size_t>(m_lyricIndex)]
         : -1;
-    if (label < 0) {
+    // Antes de la primera línea: arriba del todo. Entre estrofas (línea vacía): se queda donde está.
+    if (label < 0 && m_lyricIndex >= 0) {
       return;
     }
-    const float target =
-        std::max(0.0F, m_lyricsBlock->centerOf(static_cast<std::size_t>(label)) - m_lyricsView->height() * 0.5F);
+    const float target = label < 0
+        ? 0.0F
+        : std::max(0.0F, m_lyricsBlock->centerOf(static_cast<std::size_t>(label)) - m_lyricsView->height() * 0.5F);
     m_lyricsView->setScrollOffset(m_scrollFrom + (target - m_scrollFrom) * m_lyricT);
     m_app.requestFrame();
   }
