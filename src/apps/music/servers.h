@@ -1,0 +1,102 @@
+#pragma once
+
+// OKARU: servidores de música de Valandy (Jellyfin y Subsonic: Navidrome, Gonic, Airsonic…). Su catálogo (solo los
+// datos, no la música) se sincroniza a la biblioteca con rutas propias ("jf://servidor/álbum/pista",
+// "sub://servidor/álbum/pista"), así álbumes, artistas, búsqueda, listas y cola funcionan igual que con lo local;
+// al reproducir, la ruta se convierte en la URL de streaming. El token de Jellyfin y la contraseña de Subsonic van
+// al llavero del sistema (libsecret), nunca a music.toml.
+
+#include "net/http_client.h"
+#include "net/http_client_poll_source.h"
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace okaru::apps {
+  class OkaruApp;
+}
+
+namespace okaru::music {
+
+  struct Track;
+
+  enum class ServerKind : std::uint8_t { Jellyfin, Subsonic };
+
+  struct Server {
+    std::string id; // propio, estable (forma parte de las rutas de sus canciones)
+    ServerKind kind = ServerKind::Jellyfin;
+    std::string name;
+    std::string url; // sin "/" final
+    std::string user;
+    std::string userId; // Jellyfin
+  };
+
+  // Prefijo de las rutas de las canciones de un servidor ("jf://id/" o "sub://id/").
+  [[nodiscard]] std::string remotePrefix(const Server& server);
+  [[nodiscard]] bool isRemote(const std::string& path);
+  // Dirección escrita por el usuario → sin espacios ni "/" final, con https:// si no trae esquema.
+  [[nodiscard]] std::string normalizeUrl(std::string url);
+  // Partes de una ruta remota: servidor, álbum (o "_") y pista.
+  struct RemoteRef {
+    std::string server;
+    std::string album;
+    std::string item;
+  };
+  [[nodiscard]] bool parseRemote(const std::string& path, RemoteRef& out);
+
+  // Llavero del sistema (libsecret, esquema dev.okaru.Music). Bloqueantes: se llaman pocas veces.
+  [[nodiscard]] std::string loadSecret(const std::string& serverId);
+  bool saveSecret(const std::string& serverId, const std::string& label, const std::string& secret);
+  void forgetSecret(const std::string& serverId);
+
+  class RemoteSources {
+  public:
+    using ConnectFn = std::function<void(bool ok, std::string error, Server server)>;
+    using SyncFn = std::function<void(bool ok, std::vector<Track> tracks)>;
+
+    RemoteSources(apps::OkaruApp& app, std::string deviceId);
+    ~RemoteSources();
+
+    RemoteSources(const RemoteSources&) = delete;
+    RemoteSources& operator=(const RemoteSources&) = delete;
+
+    void setServers(std::vector<Server> servers);
+    [[nodiscard]] const std::vector<Server>& servers() const noexcept { return m_servers; }
+    // Inicia sesión (Jellyfin: usuario/contraseña → token; Subsonic: ping) y guarda el secreto en el llavero.
+    void connect(Server server, const std::string& password, ConnectFn done);
+    // Todo el catálogo de canciones del servidor, por páginas.
+    void sync(const Server& server, SyncFn done);
+    // Lo que mpv abre para una ruta remota (vacío si no es remota o falta el secreto).
+    [[nodiscard]] std::string streamUrl(const std::string& path) const;
+    // Carátula del álbum (o de la pista) en el servidor.
+    [[nodiscard]] std::string coverUrl(const std::string& path) const;
+    void forget(const std::string& serverId);
+
+  private:
+    [[nodiscard]] const Server* find(const std::string& id) const;
+    [[nodiscard]] std::string jellyfinAuth(const std::string& token) const;
+    [[nodiscard]] std::string subsonicQuery(const Server& server) const;
+    void syncJellyfin(const Server& server, std::shared_ptr<std::vector<Track>> out, int start, SyncFn done);
+    void syncSubsonicSearch(const Server& server, std::shared_ptr<std::vector<Track>> out, int offset, SyncFn done);
+    void syncSubsonicAlbums(
+        const Server& server, std::shared_ptr<std::vector<Track>> out, std::shared_ptr<std::vector<std::string>> albums,
+        int offset, SyncFn done
+    );
+    void syncSubsonicAlbum(
+        const Server& server, std::shared_ptr<std::vector<Track>> out, std::shared_ptr<std::vector<std::string>> albums,
+        std::size_t index, SyncFn done
+    );
+
+    HttpClient m_http;
+    HttpClientPollSource m_source{m_http};
+    std::string m_deviceId;
+    std::vector<Server> m_servers;
+    std::unordered_map<std::string, std::string> m_secrets; // id → token o contraseña (en memoria)
+    std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);
+  };
+
+} // namespace okaru::music

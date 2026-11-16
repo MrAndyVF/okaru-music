@@ -4,8 +4,10 @@
 #include "apps/music/lyrics.h"
 #include "apps/music/music_state.h"
 #include "apps/music/playlists.h"
+#include "apps/music/servers.h"
 #include "core/deferred_call.h"
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -213,6 +215,19 @@ namespace {
     }
   }
 
+  void testRemote() {
+    Server jf{.id = "ab12", .kind = ServerKind::Jellyfin};
+    Server sub{.id = "cd34", .kind = ServerKind::Subsonic};
+    assert(remotePrefix(jf) == "jf://ab12/" && remotePrefix(sub) == "sub://cd34/");
+    assert(isRemote("jf://ab12/x/y") && isRemote("sub://a/b/c") && !isRemote("/home/m/a.flac"));
+    RemoteRef ref;
+    assert(parseRemote("jf://ab12/album9/item7", ref) && ref.server == "ab12" && ref.album == "album9" && ref.item == "item7");
+    assert(parseRemote("sub://cd34/_/song1", ref) && ref.album == "_" && ref.item == "song1");
+    assert(!parseRemote("/home/a.flac", ref) && !parseRemote("jf://ab12/solo", ref));
+    assert(normalizeUrl("  music.example.com/ ") == "https://music.example.com");
+    assert(normalizeUrl("http://192.168.1.5:4533//") == "http://192.168.1.5:4533");
+  }
+
   void testShuffle() {
     const std::vector<std::string> items{"a", "b", "c", "d", "e"};
     const auto out = shuffledWithFirst(items, 3);
@@ -263,6 +278,18 @@ namespace {
     fs::remove(root / "music" / "album" / "two.wav");
     assert(runScan({root / "music"}).tracks.size() == 1);
     assert(runScan({root / "music", root / "unmounted"}).tracks.size() == 1);
+    // Las de un servidor no son de las carpetas: el escaneo local no las toca; su sincronización las reemplaza.
+    Track remote;
+    remote.path = "jf://ab12/al1/it1";
+    remote.title = "Remota";
+    library.replaceRemote("jf://ab12/", {remote});
+    assert(runScan({root / "music"}).tracks.size() == 2);
+    remote.path = "jf://ab12/al1/it2";
+    library.replaceRemote("jf://ab12/", {remote});
+    const Model synced = library.load();
+    assert(synced.tracks.size() == 2);
+    assert(std::ranges::any_of(synced.tracks, [](const Track& t) { return t.path == "jf://ab12/al1/it2"; }));
+    library.replaceRemote("jf://ab12/", {});
     // Sin la carpeta en la lista, sus canciones salen de la biblioteca.
     assert(runScan({}).tracks.empty());
     fs::remove_all(root);
@@ -277,6 +304,7 @@ int main() {
   testLyrics();
   testSettings();
   testPlaylists();
+  testRemote();
   testShuffle();
   testScan();
   return 0;

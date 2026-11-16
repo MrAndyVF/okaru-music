@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 struct mpv_handle;
@@ -49,6 +50,9 @@ namespace okaru::music {
     [[nodiscard]] const std::string& currentItem() const;
 
     void setOnChange(ChangeFn callback) { m_onChange = std::move(callback); }
+    // Lo que mpv abre para una ruta de la biblioteca (las de servidores son URL de streaming). La cola sigue
+    // hablando en rutas: las URL se traducen de vuelta al leer la lista de mpv.
+    void setResolver(std::function<std::string(const std::string&)> resolver) { m_resolver = std::move(resolver); }
 
     // Reemplaza la cola y empieza por `start` (con aleatorio activo, `start` va primero y el resto se mezcla).
     void playQueue(const std::vector<std::string>& items, std::size_t start, bool paused = false);
@@ -84,6 +88,8 @@ namespace okaru::music {
     void drainEvents();
     void onProperty(const char* name, int format, void* data);
     void command(const std::vector<std::string>& args);
+    // Ruta → lo que abre mpv (y lo recuerda para traducir de vuelta).
+    [[nodiscard]] std::string playable(const std::string& item);
     // Deja la canción actual y pone `before` delante y `after` detrás (sin cortar la que suena).
     void surround(const std::vector<std::string>& before, const std::vector<std::string>& after);
 
@@ -93,6 +99,8 @@ namespace okaru::music {
     bool m_shuffled = false;
     Repeat m_repeat = Repeat::Off;
     std::vector<std::string> m_original; // la cola sin mezclar, para volver a ella
+    std::function<std::string(const std::string&)> m_resolver;
+    std::unordered_map<std::string, std::string> m_itemOf; // lo que se le dio a mpv → ruta de la biblioteca
     int m_crossfade = 0;
     mpv_handle* m_tail = nullptr;
     Timer m_fadeTimer;

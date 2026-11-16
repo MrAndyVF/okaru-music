@@ -126,10 +126,10 @@ namespace okaru::music {
   void AudioPlayer::surround(const std::vector<std::string>& before, const std::vector<std::string>& after) {
     command({"playlist-clear"}); // deja solo la que suena
     for (std::size_t i = 0; i < before.size(); ++i) {
-      command({"loadfile", before[i], "insert-at", std::to_string(i)});
+      command({"loadfile", playable(before[i]), "insert-at", std::to_string(i)});
     }
     for (const auto& item : after) {
-      command({"loadfile", item, "append"});
+      command({"loadfile", playable(item), "append"});
     }
   }
 
@@ -142,7 +142,7 @@ namespace okaru::music {
     const std::size_t first = m_shuffled ? 0 : start;
     int flag = paused ? 1 : 0;
     mpv_set_property_async(m_mpv, 0, "pause", MPV_FORMAT_FLAG, &flag);
-    command({"loadfile", order[first], "replace"});
+    command({"loadfile", playable(order[first]), "replace"});
     surround(
         {order.begin(), order.begin() + static_cast<std::ptrdiff_t>(first)},
         {order.begin() + static_cast<std::ptrdiff_t>(first) + 1, order.end()}
@@ -163,7 +163,7 @@ namespace okaru::music {
       return;
     }
     for (const auto& item : items) {
-      command({"loadfile", item, "append"});
+      command({"loadfile", playable(item), "append"});
       m_original.push_back(item);
     }
   }
@@ -175,7 +175,7 @@ namespace okaru::music {
     }
     // insert-next las pondría al revés si se insertan de a una: se insertan desde la última.
     for (auto it = items.rbegin(); it != items.rend(); ++it) {
-      command({"loadfile", *it, "insert-next"});
+      command({"loadfile", playable(*it), "insert-next"});
     }
     m_original.insert(m_original.end(), items.begin(), items.end());
   }
@@ -384,7 +384,7 @@ namespace okaru::music {
       m_tail = nullptr;
       return;
     }
-    const std::string item = currentItem();
+    const std::string item = playable(currentItem());
     const char* load[] = {"loadfile", item.c_str(), nullptr};
     mpv_command_async(m_tail, 0, load);
     // La principal pasa ya a la siguiente, en silencio, y sube con el fundido.
@@ -448,10 +448,23 @@ namespace okaru::music {
         m_state.queue.reserve(static_cast<std::size_t>(list->num));
         for (int i = 0; i < list->num; ++i) {
           const auto* file = mapValue(list->values[i], "filename");
-          m_state.queue.emplace_back(file != nullptr && file->format == MPV_FORMAT_STRING ? file->u.string : "");
+          std::string entry = file != nullptr && file->format == MPV_FORMAT_STRING ? file->u.string : "";
+          if (const auto it = m_itemOf.find(entry); it != m_itemOf.end()) {
+            entry = it->second;
+          }
+          m_state.queue.push_back(std::move(entry));
         }
       }
     }
+  }
+
+  std::string AudioPlayer::playable(const std::string& item) {
+    std::string url = m_resolver ? m_resolver(item) : std::string();
+    if (url.empty()) {
+      return item;
+    }
+    m_itemOf[url] = item;
+    return url;
   }
 
   std::string formatTime(double seconds) {

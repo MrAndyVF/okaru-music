@@ -108,6 +108,9 @@ namespace okaru::music {
     void scan(std::vector<std::filesystem::path> folders, SourceOrder covers, ProgressFn progress, DoneFn done);
     // Borra la base y las carátulas guardadas (el próximo escaneo lee todo de nuevo).
     void reset();
+    // Reemplaza las canciones de un servidor (rutas con `prefix`) por las sincronizadas, conservando sus carátulas.
+    // shortcut: en el hilo principal (unos cientos de ms con decenas de miles); al hilo del escaneo si se nota.
+    void replaceRemote(const std::string& prefix, const std::vector<Track>& tracks);
     // Carátula descargada para esas canciones (hilo principal; es una escritura corta).
     void setCover(const std::vector<std::string>& paths, const std::string& cover);
     [[nodiscard]] const std::filesystem::path& coversDir() const noexcept { return m_coversDir; }

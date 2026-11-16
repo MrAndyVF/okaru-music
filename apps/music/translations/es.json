@@ -161,6 +161,25 @@
         "add-to": "Agregar a «{name}»",
         "new-playlist": "Nueva lista con esta canción…",
         "remove-from-playlist": "Quitar de esta lista"
+      },
+      "servers": {
+        "title": "Servidores",
+        "hint": "Escucha desde tu propio servidor Jellyfin o Subsonic (Navidrome, Gonic, Airsonic…). Sus canciones se suman a tu biblioteca; la música no se descarga. Contraseñas y tokens quedan en el llavero del sistema.",
+        "add": "Agregar servidor",
+        "sync": "Sincronizar ahora",
+        "remove": "Quitar servidor",
+        "subsonic": "Subsonic (Navidrome, Gonic…)",
+        "url": "Dirección del servidor (https://…)",
+        "name": "Nombre (opcional)",
+        "user": "Usuario",
+        "password": "Contraseña",
+        "connect": "Conectar",
+        "connecting": "Conectando…",
+        "syncing": "sincronizando…",
+        "failed": "no se pudo sincronizar",
+        "missing": "Escribe la dirección y el usuario.",
+        "unreachable": "No se pudo llegar al servidor. Revisa la dirección y tu conexión.",
+        "rejected": "El servidor rechazó el inicio de sesión ({error})."
       }
     }
   }

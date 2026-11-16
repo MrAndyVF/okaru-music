@@ -4,6 +4,7 @@
 // aleatorio, repetir, el orden de cada vista y la cola con la canción en la que quedó.
 
 #include "apps/music/audio_player.h"
+#include "apps/music/servers.h"
 
 #include <array>
 #include <cstdint>
@@ -51,6 +52,8 @@ namespace okaru::music {
     std::array<std::uint8_t, 4> sort{};
     std::array<bool, 4> reverse{};
     Settings settings;
+    std::vector<Server> servers; // sin secretos: esos van al llavero
+    std::string deviceId;        // identifica esta instalación ante Jellyfin
   };
 
   [[nodiscard]] std::filesystem::path statePath();

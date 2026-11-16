@@ -161,6 +161,25 @@
         "add-to": "Add to «{name}»",
         "new-playlist": "New playlist with this song…",
         "remove-from-playlist": "Remove from this playlist"
+      },
+      "servers": {
+        "title": "Servers",
+        "hint": "Stream from your own Jellyfin or Subsonic server (Navidrome, Gonic, Airsonic…). Its songs join your library; the music is not downloaded. Passwords and tokens are kept in the system keyring.",
+        "add": "Add server",
+        "sync": "Sync now",
+        "remove": "Remove server",
+        "subsonic": "Subsonic (Navidrome, Gonic…)",
+        "url": "Server address (https://…)",
+        "name": "Name (optional)",
+        "user": "User",
+        "password": "Password",
+        "connect": "Connect",
+        "connecting": "Connecting…",
+        "syncing": "syncing…",
+        "failed": "could not sync",
+        "missing": "Write the address and the user.",
+        "unreachable": "The server could not be reached. Check the address and your connection.",
+        "rejected": "The server rejected the login ({error})."
       }
     }
   }

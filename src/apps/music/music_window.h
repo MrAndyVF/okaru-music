@@ -13,6 +13,7 @@
 #include "apps/music/music_state.h"
 #include "apps/music/online.h"
 #include "apps/music/playlists.h"
+#include "apps/music/servers.h"
 #include "ui/controls/scroll_view.h"
 
 #include <chrono>
@@ -26,6 +27,7 @@
 
 class AnimationManager;
 class Button;
+class Flex;
 class ScrollView;
 class Input;
 class Label;
@@ -84,6 +86,13 @@ namespace okaru::music {
     [[nodiscard]] double estimatedPosition() const;
     // Carátulas que faltan, de internet (si está activo), una a una.
     void fetchMissingCovers();
+    void applyCover(const std::vector<std::string>& paths, const std::string& cover);
+    // Servidores: sincronizar su catálogo, quitar uno, y el formulario para agregar.
+    void syncServers();
+    void syncServer(const std::string& id);
+    void removeServer(const std::string& id);
+    void submitServer();
+    [[nodiscard]] std::unique_ptr<Node> buildServerForm(Flex& card, float width, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildEmpty(float width, float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildTracks(std::vector<std::size_t> tracks, bool numbers, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildAlbums(std::vector<std::size_t> albums, float scale);
@@ -107,7 +116,7 @@ namespace okaru::music {
     void openSongMenu(std::vector<std::string> paths, float x, float y, std::int64_t playlist = 0, std::size_t index = 0);
     [[nodiscard]] std::unique_ptr<Node> buildMenu(float width, float height, float scale);
     // Diálogo con un nombre (nueva lista o renombrar).
-    enum class Dialog : std::uint8_t { None, NewPlaylist, RenamePlaylist };
+    enum class Dialog : std::uint8_t { None, NewPlaylist, RenamePlaylist, AddServer };
     void openDialog(Dialog dialog, std::vector<std::string> paths = {});
     void submitDialog();
     [[nodiscard]] std::unique_ptr<Node> buildDialog(float width, float height, float scale);
@@ -152,6 +161,20 @@ namespace okaru::music {
     Input* m_dialogInput = nullptr;
     std::string m_titleFont; // familia de la fuente de firma del nombre (vacía si no cargó)
     Button* m_likeButton = nullptr;
+    std::unique_ptr<RemoteSources> m_remote;
+    enum class ServerStatus : std::uint8_t { Idle, Syncing, Ready, Failed };
+    std::unordered_map<std::string, ServerStatus> m_serverStatus;
+    std::unordered_map<std::string, std::size_t> m_serverCount;
+    struct ServerForm {
+      ServerKind kind = ServerKind::Jellyfin;
+      std::string name;
+      std::string url;
+      std::string user;
+      std::string password;
+      std::string error;
+      bool busy = false;
+    };
+    ServerForm m_serverForm;
     Model m_model;
     MusicState m_state;
     AudioPlayer m_player;

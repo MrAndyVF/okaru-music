@@ -650,6 +650,15 @@ namespace okaru::music {
       }
     });
 
+    // Servidores: un identificador propio para Jellyfin, sus secretos del llavero, y las rutas remotas como streaming.
+    if (m_state.deviceId.empty()) {
+      m_state.deviceId = std::format("valandy-{:08x}{:08x}", g_random_int(), g_random_int());
+    }
+    m_remote = std::make_unique<RemoteSources>(m_app, m_state.deviceId);
+    m_remote->setServers(m_state.servers);
+    m_player.setResolver([this](const std::string& path) {
+      return isRemote(path) ? m_remote->streamUrl(path) : std::string();
+    });
     m_player.setVolume(m_state.volume);
     m_player.setShuffle(m_state.shuffle);
     m_player.setRepeat(m_state.repeat);
@@ -675,6 +684,7 @@ namespace okaru::music {
     // Biblioteca vacía: siempre se lee; si no, solo si está activado buscar cambios al abrir.
     if (m_model.tracks.empty() || m_state.settings.scanOnStart) {
       rescan();
+      syncServers();
     } else {
       fetchMissingCovers();
     }
@@ -2369,10 +2379,9 @@ namespace okaru::music {
   }
 
   void MusicWindow::fetchMissingCovers() {
-    if (!m_state.settings.covers.on(Source::Online)) {
-      return;
-    }
     // Una petición por álbum sin carátula (o por canción suelta, sin álbum); lo ya buscado sin éxito no se repite.
+    // Las de un servidor vienen de él (siempre); las locales, de internet si está activado.
+    const bool online = m_state.settings.covers.on(Source::Online);
     for (const Album& album : m_model.albums) {
       if (!album.cover.empty() || album.tracks.empty()) {
         continue;
@@ -2380,49 +2389,143 @@ namespace okaru::music {
       const auto groups = album.title.empty() ? album.tracks : std::vector<std::size_t>{album.tracks.front()};
       for (std::size_t index : groups) {
         const Track& track = m_model.tracks[index];
-        const fs::path target = coverPathFor(track, m_library.coversDir());
-        std::error_code ec;
-        if (m_coversFetching.contains(target.string()) || OnlineService::knownMissing(target) || fs::exists(target, ec)) {
+        const bool remote = isRemote(track.path);
+        if (!remote && !online) {
           continue;
         }
-        m_coversFetching.insert(target.string());
+        const fs::path target = coverPathFor(track, m_library.coversDir());
+        if (m_coversFetching.contains(target.string()) || OnlineService::knownMissing(target)) {
+          continue;
+        }
         // Las canciones que comparten esa carátula: el álbum entero, o solo esa.
         std::vector<std::string> paths;
         for (std::size_t t : album.title.empty() ? std::vector<std::size_t>{index} : album.tracks) {
           paths.push_back(m_model.tracks[t].path);
         }
-        m_online.fetchCover(track, target, [this, target, paths = std::move(paths)](bool ok) {
+        m_coversFetching.insert(target.string());
+        auto done = [this, target, paths = std::move(paths)](bool ok) {
           m_coversFetching.erase(target.string());
-          if (!ok) {
-            return;
+          if (ok) {
+            applyCover(paths, target.string());
           }
-          m_library.setCover(paths, target.string());
-          for (const auto& path : paths) {
-            if (const auto it = m_byPath.find(path); it != m_byPath.end()) {
-              m_model.tracks[it->second].cover = target.string();
-            }
-          }
-          for (Album& a : m_model.albums) {
-            if (a.cover.empty() && !a.tracks.empty() && m_model.tracks[a.tracks.front()].cover == target.string()) {
-              a.cover = target.string();
-            }
-          }
-          for (Artist& artist : m_model.artists) {
-            for (std::size_t a : artist.albums) {
-              if (artist.cover.empty() && !m_model.albums[a].cover.empty()) {
-                artist.cover = m_model.albums[a].cover;
-              }
-            }
-          }
-          // Varias pueden llegar seguidas: una sola reconstrucción. Con el reproductor abierto no se toca la vista.
-          m_coverRebuild.start(std::chrono::milliseconds(1500), [this] {
-            if (!m_fullPlayer) {
-              m_app.requestRebuild();
-            }
-          });
-        });
+        };
+        std::error_code ec;
+        if (fs::exists(target, ec)) {
+          done(true); // ya estaba guardada (otro álbum igual, o una sincronización anterior)
+        } else if (remote) {
+          m_online.downloadCover(m_remote->coverUrl(track.path), target, std::move(done));
+        } else {
+          m_online.fetchCover(track, target, std::move(done));
+        }
       }
     }
+  }
+
+  void MusicWindow::applyCover(const std::vector<std::string>& paths, const std::string& cover) {
+    m_library.setCover(paths, cover);
+    for (const auto& path : paths) {
+      if (const auto it = m_byPath.find(path); it != m_byPath.end()) {
+        m_model.tracks[it->second].cover = cover;
+      }
+    }
+    for (Album& a : m_model.albums) {
+      if (a.cover.empty() && !a.tracks.empty() && m_model.tracks[a.tracks.front()].cover == cover) {
+        a.cover = cover;
+      }
+    }
+    for (Artist& artist : m_model.artists) {
+      for (std::size_t a : artist.albums) {
+        if (artist.cover.empty() && !m_model.albums[a].cover.empty()) {
+          artist.cover = m_model.albums[a].cover;
+        }
+      }
+    }
+    // Varias pueden llegar seguidas: una sola reconstrucción. Con el reproductor abierto no se toca la vista.
+    m_coverRebuild.start(std::chrono::milliseconds(1500), [this] {
+      if (!m_fullPlayer) {
+        m_app.requestRebuild();
+      }
+    });
+  }
+
+  // ── Servidores ────────────────────────────────────────────────────────────────────────────────────
+
+  void MusicWindow::syncServers() {
+    for (const Server& server : m_state.servers) {
+      syncServer(server.id);
+    }
+  }
+
+  void MusicWindow::syncServer(const std::string& id) {
+    const auto it = std::ranges::find(m_state.servers, id, &Server::id);
+    if (it == m_state.servers.end() || m_serverStatus[id] == ServerStatus::Syncing) {
+      return;
+    }
+    m_serverStatus[id] = ServerStatus::Syncing;
+    m_app.requestRebuild();
+    const Server server = *it;
+    m_remote->sync(server, [this, server](bool ok, std::vector<Track> tracks) {
+      if (!ok) {
+        // Sin red o error: se queda lo que ya había de ese servidor.
+        m_serverStatus[server.id] = ServerStatus::Failed;
+        m_app.requestRebuild();
+        return;
+      }
+      m_serverStatus[server.id] = ServerStatus::Ready;
+      m_serverCount[server.id] = tracks.size();
+      m_library.replaceRemote(remotePrefix(server), tracks);
+      setModel(m_library.load());
+      fetchMissingCovers();
+    });
+  }
+
+  void MusicWindow::removeServer(const std::string& id) {
+    const auto it = std::ranges::find(m_state.servers, id, &Server::id);
+    if (it == m_state.servers.end()) {
+      return;
+    }
+    m_library.replaceRemote(remotePrefix(*it), {});
+    m_remote->forget(id);
+    m_state.servers.erase(it);
+    m_serverStatus.erase(id);
+    saveState();
+    setModel(m_library.load());
+  }
+
+  void MusicWindow::submitServer() {
+    ServerForm& form = m_serverForm;
+    if (form.busy) {
+      return;
+    }
+    Server server;
+    server.id = std::format("{:08x}", g_random_int());
+    server.kind = form.kind;
+    server.url = normalizeUrl(form.url);
+    server.user = form.user;
+    server.name = form.name.empty() ? server.url.substr(server.url.find("://") + 3) : form.name;
+    if (server.url.empty() || server.user.empty()) {
+      form.error = tr("apps.music.servers.missing");
+      m_app.requestRebuild();
+      return;
+    }
+    form.busy = true;
+    form.error.clear();
+    m_app.requestRebuild();
+    m_remote->connect(server, form.password, [this](bool ok, std::string error, Server connected) {
+      m_serverForm.busy = false;
+      if (!ok) {
+        m_serverForm.error = error == "unreachable" ? tr("apps.music.servers.unreachable")
+                                                    : tr("apps.music.servers.rejected", "error", error);
+        m_app.requestRebuild();
+        return;
+      }
+      m_serverForm = {};
+      m_dialog = Dialog::None;
+      m_state.servers.push_back(connected);
+      m_remote->setServers(m_state.servers);
+      saveState();
+      syncServer(connected.id);
+    });
   }
 
   std::unique_ptr<Node> MusicWindow::buildSourceList(SourceOrder& sources, bool lyrics, float width, float scale) {
@@ -2595,6 +2698,73 @@ namespace okaru::music {
                   m_library.reset();
                   setModel({});
                   rescan();
+                },
+        })
+    ));
+
+    // Servidores.
+    page->addChild(section("server", "apps.music.servers.title"));
+    page->addChild(ui::label({
+        .text = tr("apps.music.servers.hint"),
+        .fontSize = Style::fontSizeCaption * scale,
+        .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+        .maxWidth = inner,
+    }));
+    for (const Server& server : m_state.servers) {
+      auto row = ui::row({
+          .align = FlexAlign::Center,
+          .gap = Style::spaceSm * scale,
+          .paddingV = Style::spaceXs * scale,
+          .paddingH = Style::spaceSm * scale,
+          .fill = colorSpecFromRole(ColorRole::SurfaceContainerHigh),
+          .width = inner,
+      });
+      const auto status = m_serverStatus.contains(server.id) ? m_serverStatus.at(server.id) : ServerStatus::Idle;
+      std::string detail = server.kind == ServerKind::Jellyfin ? "Jellyfin" : "Subsonic";
+      if (status == ServerStatus::Syncing) {
+        detail = joinDot({detail, tr("apps.music.servers.syncing")});
+      } else if (status == ServerStatus::Failed) {
+        detail = joinDot({detail, tr("apps.music.servers.failed")});
+      } else if (status == ServerStatus::Ready) {
+        detail = joinDot({detail, trp("apps.music.song-count", static_cast<long>(m_serverCount[server.id]))});
+      }
+      auto text = ui::column({.align = FlexAlign::Start, .gap = 2.0F * scale, .flexGrow = 1.0F});
+      text->addChild(ui::label({.text = server.name, .fontSize = Style::fontSizeBody * scale, .fontWeight = FontWeight::SemiBold, .maxLines = 1}));
+      text->addChild(ui::label({
+          .text = joinDot({detail, server.user + " @ " + server.url}),
+          .fontSize = Style::fontSizeCaption * scale,
+          .color = colorSpecFromRole(status == ServerStatus::Failed ? ColorRole::Error : ColorRole::OnSurfaceVariant),
+          .maxWidth = std::max(120.0F * scale, inner - 160.0F * scale),
+          .maxLines = 1,
+          .ellipsize = TextEllipsize::Middle,
+      }));
+      row->addChild(ui::glyph({.glyph = "server", .glyphSize = 18.0F * scale, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant)}));
+      row->addChild(std::move(text));
+      row->addChild(ui::button({
+          .glyph = "refresh",
+          .enabled = status != ServerStatus::Syncing,
+          .variant = ButtonVariant::Ghost,
+          .tooltip = tr("apps.music.servers.sync"),
+          .onClick = [this, id = server.id] { syncServer(id); },
+      }));
+      row->addChild(ui::button({
+          .glyph = "x",
+          .variant = ButtonVariant::Ghost,
+          .tooltip = tr("apps.music.servers.remove"),
+          .onClick = [this, id = server.id] { removeServer(id); },
+      }));
+      page->addChild(std::move(row));
+    }
+    page->addChild(ui::row(
+        {.align = FlexAlign::Center},
+        ui::button({
+            .text = tr("apps.music.servers.add"),
+            .glyph = "plus",
+            .variant = ButtonVariant::Outline,
+            .onClick =
+                [this] {
+                  m_serverForm = {};
+                  openDialog(Dialog::AddServer);
                 },
         })
     ));
@@ -2874,6 +3044,15 @@ namespace okaru::music {
         .fill = colorSpecFromRole(ColorRole::SurfaceContainerHigh),
         .width = cardWidth,
     });
+    if (m_dialog == Dialog::AddServer) {
+      card->addChild(buildServerForm(*card, cardWidth - Style::spaceLg * 2.0F * scale, scale));
+      if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
+        card->layout(*renderer);
+      }
+      card->setPosition(std::round((width - cardWidth) * 0.5F), std::round((height - card->height()) * 0.4F));
+      layer->addChild(std::move(card));
+      return layer;
+    }
     card->addChild(ui::label({
         .text = m_dialog == Dialog::NewPlaylist ? tr("apps.music.playlist.new") : tr("apps.music.playlist.rename"),
         .fontSize = Style::fontSizeTitle * scale,
@@ -2910,6 +3089,64 @@ namespace okaru::music {
     return layer;
   }
 
+  std::unique_ptr<Node> MusicWindow::buildServerForm(Flex& card, float width, float scale) {
+    ServerForm& form = m_serverForm;
+    card.addChild(ui::label({.text = tr("apps.music.servers.add"), .fontSize = Style::fontSizeTitle * scale, .fontWeight = FontWeight::SemiBold}));
+    card.addChild(ui::select({
+        .options = std::vector<std::string>{"Jellyfin", tr("apps.music.servers.subsonic")},
+        .selectedIndex = form.kind == ServerKind::Jellyfin ? 0U : 1U,
+        .width = width,
+        .onSelectionChanged =
+            [this](std::size_t index, std::string_view) {
+              m_serverForm.kind = index == 0 ? ServerKind::Jellyfin : ServerKind::Subsonic;
+            },
+    }));
+    const auto field = [&](std::string& value, const char* placeholder, bool password, Input** out) {
+      card.addChild(ui::input({
+          .out = out,
+          .value = value,
+          .placeholder = tr(placeholder),
+          .passwordMode = password,
+          .width = width,
+          .onChange = [&value](const std::string& text) { value = text; },
+          .onSubmit = [this](const std::string&) { DeferredCall::callLater([this] { submitServer(); }); },
+      }));
+    };
+    field(form.url, "apps.music.servers.url", false, &m_dialogInput); // el primero recibe el foco
+    field(form.name, "apps.music.servers.name", false, nullptr);
+    field(form.user, "apps.music.servers.user", false, nullptr);
+    field(form.password, "apps.music.servers.password", true, nullptr);
+    if (!form.error.empty()) {
+      card.addChild(ui::label({
+          .text = form.error,
+          .fontSize = Style::fontSizeCaption * scale,
+          .color = colorSpecFromRole(ColorRole::Error),
+          .maxWidth = width,
+      }));
+    }
+    auto buttons = ui::row({.align = FlexAlign::Center, .justify = FlexJustify::End, .gap = Style::spaceSm * scale, .fillWidth = true});
+    if (form.busy) {
+      buttons->addChild(ui::spinner({}));
+    }
+    buttons->addChild(ui::button({
+        .text = tr("apps.music.cancel"),
+        .variant = ButtonVariant::Ghost,
+        .onClick =
+            [this] {
+              m_dialog = Dialog::None;
+              m_serverForm = {};
+              m_app.requestRebuild();
+            },
+    }));
+    buttons->addChild(ui::button({
+        .text = form.busy ? tr("apps.music.servers.connecting") : tr("apps.music.servers.connect"),
+        .enabled = !form.busy,
+        .variant = ButtonVariant::Primary,
+        .onClick = [this] { submitServer(); },
+    }));
+    return buttons;
+  }
+
   bool MusicWindow::onKey(const KeyboardEvent& event) {
     if (!event.pressed || event.preedit) {
       return false;
@@ -2917,8 +3154,7 @@ namespace okaru::music {
     const bool ctrl = (event.modifiers & KeyMod::Ctrl) != 0;
     // Escribiendo en la búsqueda, las teclas sueltas son texto.
     const InputArea* focused = m_app.input().focusedArea();
-    const bool typing = (m_search != nullptr && focused == m_search->inputArea())
-        || (m_dialogInput != nullptr && focused == m_dialogInput->inputArea());
+    const bool typing = (m_search != nullptr && focused == m_search->inputArea()) || m_dialog != Dialog::None;
     switch (event.sym) {
     case XKB_KEY_q:
     case XKB_KEY_w:

@@ -34,6 +34,8 @@ namespace okaru::music {
     void fetchLyrics(const Track& track, const std::filesystem::path& cache, std::function<void(std::string)> done);
     // Portada del álbum (o de la canción si no tiene álbum) guardada reducida en `target`; `done(true)` si se encontró.
     void fetchCover(const Track& track, const std::filesystem::path& target, std::function<void(bool)> done);
+    // Imagen de una URL (la carátula que da un servidor) reducida y guardada en `target`. Como mucho 4 a la vez.
+    void downloadCover(std::string url, const std::filesystem::path& target, std::function<void(bool)> done);
     // Ya se buscó y no estaba (marca `<archivo>.none`).
     [[nodiscard]] static bool knownMissing(const std::filesystem::path& cached);
 
@@ -44,6 +46,15 @@ namespace okaru::music {
     void tryCoverArt(std::shared_ptr<std::vector<std::string>> releases, std::size_t index,
                      std::filesystem::path target, std::function<void(bool)> done);
 
+    void pumpDownloads();
+
+    struct Download {
+      std::string url;
+      std::filesystem::path target;
+      std::function<void(bool)> done;
+    };
+    std::deque<Download> m_downloads;
+    int m_activeDownloads = 0;
     HttpClient m_http;
     HttpClientPollSource m_source{m_http};
     std::deque<std::function<void()>> m_mbQueue;
