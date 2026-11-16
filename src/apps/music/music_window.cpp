@@ -34,6 +34,7 @@ namespace okaru::music {
     constexpr float kAlbumMinWidth = 168.0F;
     constexpr float kAlbumTextHeight = 48.0F;
     constexpr float kDetailCover = 148.0F;
+    constexpr float kLyricDim = 0.6F; // letra sincronizada: las líneas que no suenan, atenuadas
     constexpr float kLibraryBackScale = 0.96F; // la biblioteca, un poco más atrás, mientras se abre el reproductor
 
     std::string joinDot(const std::vector<std::string>& parts) {
@@ -1797,7 +1798,8 @@ namespace okaru::music {
           .text = lyric.text,
           .fontSize = Style::fontSizeTitle * scale,
           .fontWeight = FontWeight::SemiBold,
-          .color = colorSpecFromRole(m_lyrics.synced ? ColorRole::OnSurfaceVariant : ColorRole::OnSurface),
+          .color = m_lyrics.synced ? colorSpecFromRole(ColorRole::OnSurfaceVariant, kLyricDim)
+                                   : colorSpecFromRole(ColorRole::OnSurface),
           .maxWidth = lineWidth,
           .textAlign = TextAlign::Center,
       });
@@ -1884,8 +1886,7 @@ namespace okaru::music {
       return label < 0 ? nullptr : static_cast<Label*>(m_lyricLines[static_cast<std::size_t>(label)]);
     };
     if (Label* old = labelAt(m_lyricIndex); old != nullptr) {
-      old->setColor(colorSpecFromRole(ColorRole::OnSurfaceVariant));
-      old->setScale(1.0F);
+      old->setColor(colorSpecFromRole(ColorRole::OnSurfaceVariant, kLyricDim));
     }
     m_lyricIndex = line;
     Label* now = labelAt(line);
@@ -1893,8 +1894,8 @@ namespace okaru::music {
       m_app.invalidate();
       return;
     }
+    // Solo color (sin escala: escalar el texto ya rasterizado lo deja borroso).
     now->setColor(colorSpecFromRole(ColorRole::Primary));
-    now->setScale(1.06F);
     // Desliza la letra para que la línea que suena quede al centro.
     if (m_lyricsView != nullptr) {
       const float target = std::max(0.0F, now->y() + now->height() * 0.5F - m_lyricsView->height() * 0.5F);
