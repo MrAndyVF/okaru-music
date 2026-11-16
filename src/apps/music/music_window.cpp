@@ -1789,23 +1789,12 @@ namespace okaru::music {
       songArea->setSize(songNode->width(), songNode->height());
     }
     bar->addChild(std::move(songArea));
-    bar->addChild(ui::button({
-        .out = &m_likeButton,
-        .glyph = m_playlists.liked(current) ? "heart-filled" : "heart",
-        .enabled = currentTrack() != nullptr,
-        .variant = ButtonVariant::Ghost,
-        .tooltip = tr("apps.music.like"),
-        .onClick =
-            [this] {
-              if (currentTrack() != nullptr) {
-                toggleLike(m_player.currentItem());
-              }
-            },
-    }));
 
     // Controles y barra de tiempo.
     auto center = ui::column({.align = FlexAlign::Center, .gap = 2.0F * scale, .flexGrow = 1.0F});
     auto buttons = ui::row({.align = FlexAlign::Center, .gap = Style::spaceXs * scale});
+    // Contrapeso del corazón (a la derecha): así reproducir queda centrado sobre la barra de tiempo.
+    buttons->addChild(ui::node({.width = Style::controlHeight * scale, .height = 1.0F}));
     buttons->addChild(
         ui::button({
             .out = &m_shuffleButton,
@@ -1854,6 +1843,20 @@ namespace okaru::music {
                 },
         })
     );
+    // Me gusta, junto a los controles.
+    buttons->addChild(ui::button({
+        .out = &m_likeButton,
+        .glyph = m_playlists.liked(current) ? "heart-filled" : "heart",
+        .enabled = currentTrack() != nullptr,
+        .variant = ButtonVariant::Ghost,
+        .tooltip = tr("apps.music.like"),
+        .onClick =
+            [this] {
+              if (currentTrack() != nullptr) {
+                toggleLike(m_player.currentItem());
+              }
+            },
+    }));
     center->addChild(std::move(buttons));
     // Lo que ocupan los demás: carátula y título, volumen, el botón del reproductor, márgenes y separaciones.
     const float others = side + infoWidth + (showVolume ? 150.0F : 40.0F) * scale + 40.0F * scale
