@@ -40,6 +40,7 @@ namespace okaru::apps {
 namespace okaru::music {
 
   class CoverImage;
+  class LyricsBlock;
   class TrackListAdapter;
   class AlbumGridAdapter;
   class NameListAdapter;
@@ -77,6 +78,7 @@ namespace okaru::music {
     // Letra de la canción actual según el orden de fuentes; si toca internet, la pide y vuelve a resolver al llegar.
     void resolveLyrics();
     void updateLyricsHighlight();
+    void centerLyricLine();
     // Carátulas que faltan, de internet (si está activo), una a una.
     void fetchMissingCovers();
     [[nodiscard]] std::unique_ptr<Node> buildEmpty(float width, float height, float scale);
@@ -141,13 +143,15 @@ namespace okaru::music {
     Node* m_fullCover = nullptr;
     Node* m_fullInfo = nullptr;
     Node* m_fullPanel = nullptr;
-    std::vector<Node*> m_lyricLines;
-    std::vector<float> m_lyricTops;
+    LyricsBlock* m_lyricsBlock = nullptr;
+    bool m_centerLyric = false;
     float m_fullY = 0.0F;
     float m_coverX = 0.0F;
     float m_infoX = 0.0F;
     float m_panelX = 0.0F;
     float m_animScale = 1.0F;
+    float m_windowWidth = 0.0F;
+    bool m_rail = false; // barra lateral solo con iconos
     float m_libraryScale = 1.0F;
     ScrollViewState m_lyricsScroll;
     Library::Progress m_progress;

@@ -29,12 +29,18 @@ namespace okaru::music {
 
     constexpr float kHeaderHeight = 56.0F;
     constexpr float kSidebarWidth = 210.0F;
+    constexpr float kRailWidth = 60.0F;          // barra lateral solo con iconos (ventanas angostas, mosaico)
+    constexpr float kRailBelow = 920.0F;          // ancho de ventana bajo el que la barra lateral se angosta
+    constexpr float kStackedPlayerBelow = 1000.0F; // bajo este ancho (o vertical), el reproductor completo va en columna
+    constexpr float kVolumeSliderFrom = 760.0F;   // desde este ancho se ve la barra de volumen
+    constexpr float kSongInfoFrom = 620.0F;       // desde este ancho, título y artista junto a la carátula de abajo
     constexpr float kNowPlayingHeight = 88.0F;
     constexpr float kRowHeight = 52.0F;
     constexpr float kAlbumMinWidth = 168.0F;
     constexpr float kAlbumTextHeight = 48.0F;
     constexpr float kDetailCover = 148.0F;
-    constexpr float kLyricDim = 0.6F; // letra sincronizada: las líneas que no suenan, atenuadas
+    constexpr float kLyricDim = 0.6F;  // letra sincronizada: las líneas que no suenan, atenuadas
+    constexpr float kLyricGrow = 1.35F; // y la que suena, más grande
     constexpr float kLibraryBackScale = 0.96F; // la biblioteca, un poco más atrás, mientras se abre el reproductor
 
     std::string joinDot(const std::vector<std::string>& parts) {
@@ -406,6 +412,93 @@ namespace okaru::music {
     std::function<void(std::size_t)> m_open;
   };
 
+  // ── Bloque de letra ──────────────────────────────────────────────────────────────────────────────
+
+  // Renglones centrados que se acomodan solos en cada maquetado: la línea resaltada puede crecer (se vuelve a
+  // dibujar más grande, nítida) y las de abajo se corren; la animación de entrada mueve cada renglón con un
+  // desplazamiento propio que el maquetado respeta.
+  class LyricsBlock final : public Node {
+  public:
+    LyricsBlock(float width, float margin, float gap, float spacer, float fontSize, float bigFontSize)
+        : m_width(width), m_margin(margin), m_gap(gap), m_spacer(spacer), m_fontSize(fontSize),
+          m_bigFontSize(bigFontSize) {}
+
+    void addLine(const std::string& text, const ColorSpec& color) {
+      auto label = ui::label({
+          .text = text,
+          .fontSize = m_fontSize,
+          .fontWeight = FontWeight::SemiBold,
+          .color = color,
+          .maxWidth = m_width,
+          .textAlign = TextAlign::Center,
+      });
+      m_labels.push_back(static_cast<Label*>(addChild(std::move(label))));
+      m_offsets.push_back(0.0F);
+      m_centers.push_back(0.0F);
+      m_entries.push_back(false);
+    }
+    void addSpacer() { m_entries.push_back(true); }
+
+    [[nodiscard]] std::size_t lineCount() const noexcept { return m_labels.size(); }
+    [[nodiscard]] Label* line(std::size_t index) const { return m_labels[index]; }
+    [[nodiscard]] float centerOf(std::size_t index) const { return m_centers[index]; }
+    void setOffset(std::size_t index, float dy) {
+      m_offsets[index] = dy;
+      markLayoutDirty();
+    }
+    void setBig(std::size_t index, bool big) {
+      m_labels[index]->setFontSize(big ? m_bigFontSize : m_fontSize);
+      markLayoutDirty();
+    }
+    // Tras cada acomodo (ahí ya se sabe dónde quedó la línea resaltada).
+    std::function<void()> onArranged;
+
+  protected:
+    LayoutSize doMeasure(Renderer& renderer, const LayoutConstraints& /*constraints*/) override {
+      arrange(renderer);
+      return {m_width, m_height};
+    }
+    void doLayout(Renderer& renderer) override {
+      arrange(renderer);
+      if (onArranged) {
+        onArranged();
+      }
+    }
+
+  private:
+    void arrange(Renderer& renderer) {
+      float y = m_margin;
+      std::size_t index = 0;
+      for (const bool spacer : m_entries) {
+        if (spacer) {
+          y += m_spacer;
+          continue;
+        }
+        Label* label = m_labels[index];
+        label->setMaxWidth(m_width);
+        label->layout(renderer);
+        label->setPosition(std::round((m_width - label->width()) * 0.5F), y + m_offsets[index]);
+        m_centers[index] = y + label->height() * 0.5F;
+        y += label->height() + m_gap;
+        ++index;
+      }
+      m_height = y + m_margin;
+      setSize(m_width, m_height);
+    }
+
+    float m_width;
+    float m_margin;
+    float m_gap;
+    float m_spacer;
+    float m_fontSize;
+    float m_bigFontSize;
+    float m_height = 0.0F;
+    std::vector<bool> m_entries; // true = separación entre estrofas
+    std::vector<Label*> m_labels;
+    std::vector<float> m_offsets;
+    std::vector<float> m_centers;
+  };
+
   // ── Ventana ──────────────────────────────────────────────────────────────────────────────────────
 
   MusicWindow::MusicWindow(apps::OkaruApp& app)
@@ -704,24 +797,28 @@ namespace okaru::music {
           this
       );
     }
-    if (m_animateLyrics && !m_lyricLines.empty()) {
+    if (m_animateLyrics && m_lyricsBlock != nullptr && m_lyricsBlock->lineCount() > 0) {
       // Renglón por renglón, cada uno sube con rebote un poco después del anterior.
       static constexpr float kLine = 460.0F;
       static constexpr float kStagger = 45.0F;
       static constexpr std::size_t kStaggered = 24; // los de más abajo entran con el último (no se ven todavía)
-      const float total = kLine + kStagger * static_cast<float>(std::min(m_lyricLines.size(), kStaggered));
-      const auto apply = [this, s](float ms) {
-        for (std::size_t i = 0; i < m_lyricLines.size(); ++i) {
+      const std::size_t count = m_lyricsBlock->lineCount();
+      const float total = kLine + kStagger * static_cast<float>(std::min(count, kStaggered));
+      const auto apply = [this, s, count](float ms) {
+        if (m_lyricsBlock == nullptr) {
+          return;
+        }
+        for (std::size_t i = 0; i < count; ++i) {
           const float start = kStagger * static_cast<float>(std::min(i, kStaggered));
           const float local = std::clamp((ms - start) / kLine, 0.0F, 1.0F);
           const float eased = applyEasing(Easing::EaseOutBack, local);
-          m_lyricLines[i]->setPosition(m_lyricLines[i]->x(), m_lyricTops[i] + (1.0F - eased) * 28.0F * s);
-          m_lyricLines[i]->setOpacity(std::clamp(local * 1.8F, 0.0F, 1.0F));
+          m_lyricsBlock->setOffset(i, (1.0F - eased) * 28.0F * s);
+          m_lyricsBlock->line(i)->setOpacity(std::clamp(local * 1.8F, 0.0F, 1.0F));
         }
-        m_app.requestFrame();
+        m_app.invalidate();
       };
       apply(0.0F);
-      anim->animate(0.0F, total, total, Easing::Linear, apply, {}, &m_lyricLines);
+      anim->animate(0.0F, total, total, Easing::Linear, apply, {}, &m_lyricLabelOf);
     }
     m_animateOpen = m_animateTrack = m_animateLyrics = false;
   }
@@ -865,8 +962,7 @@ namespace okaru::music {
     m_durationLabel = nullptr;
     m_shownItem.clear();
     m_fullRoot = m_fullCover = m_fullInfo = m_fullPanel = nullptr;
-    m_lyricLines.clear();
-    m_lyricTops.clear();
+    m_lyricsBlock = nullptr;
     m_lyricsView = nullptr;
     m_lyricLabelOf.clear();
     m_crossfadeLabel = nullptr;
@@ -874,7 +970,9 @@ namespace okaru::music {
 
     const float header = kHeaderHeight * scale;
     const float bottom = kNowPlayingHeight * scale;
-    const float sidebar = kSidebarWidth * scale;
+    m_windowWidth = width;
+    m_rail = width < kRailBelow * scale;
+    const float sidebar = (m_rail ? kRailWidth : kSidebarWidth) * scale;
     const float bodyHeight = std::max(0.0F, height - header - bottom);
 
     auto root = ui::node({.width = width, .height = height});
@@ -919,7 +1017,8 @@ namespace okaru::music {
             .text = tr("apps.music.title"),
             .fontSize = Style::fontSizeTitle * scale,
             .fontWeight = FontWeight::SemiBold,
-            .minWidth = (kSidebarWidth - 60.0F) * scale,
+            .minWidth = m_rail ? 0.0F : (kSidebarWidth - 60.0F) * scale,
+            .visible = !m_rail,
         })
     );
     header->addChild(
@@ -978,9 +1077,21 @@ namespace okaru::music {
         .gap = 2.0F * scale,
         .padding = Style::spaceSm * scale,
         .fill = colorSpecFromRole(ColorRole::SurfaceContainerLow),
-        .width = kSidebarWidth * scale,
+        .width = (m_rail ? kRailWidth : kSidebarWidth) * scale,
         .height = height,
     });
+    // Angosta: solo iconos, con el nombre en el tooltip.
+    const auto entryButton = [&](const char* glyph, const char* key, bool active, std::function<void()> onClick) {
+      return ui::button({
+          .text = m_rail ? std::optional<std::string>{} : std::optional<std::string>{tr(key)},
+          .glyph = glyph,
+          .selected = active,
+          .contentAlign = m_rail ? ButtonContentAlign::Center : ButtonContentAlign::Start,
+          .variant = active ? ButtonVariant::Secondary : ButtonVariant::Ghost,
+          .tooltip = m_rail ? std::optional<std::string>{tr(key)} : std::nullopt,
+          .onClick = std::move(onClick),
+      });
+    };
     struct Entry {
       View view;
       const char* glyph;
@@ -994,29 +1105,11 @@ namespace okaru::music {
     }};
     for (const auto& entry : kEntries) {
       const bool active = m_view == entry.view && m_query.empty();
-      side->addChild(
-          ui::button({
-              .text = tr(entry.key),
-              .glyph = entry.glyph,
-              .selected = active,
-              .contentAlign = ButtonContentAlign::Start,
-              .variant = active ? ButtonVariant::Secondary : ButtonVariant::Ghost,
-              .onClick = [this, view = entry.view] { show(view); },
-          })
-      );
+      side->addChild(entryButton(entry.glyph, entry.key, active, [this, view = entry.view] { show(view); }));
     }
     side->addChild(ui::node({.flexGrow = 1.0F}));
     const bool settings = m_view == View::Settings && m_query.empty();
-    side->addChild(
-        ui::button({
-            .text = tr("apps.music.settings.title"),
-            .glyph = "settings",
-            .selected = settings,
-            .contentAlign = ButtonContentAlign::Start,
-            .variant = settings ? ButtonVariant::Secondary : ButtonVariant::Ghost,
-            .onClick = [this] { show(View::Settings); },
-        })
-    );
+    side->addChild(entryButton("settings", "apps.music.settings.title", settings, [this] { show(View::Settings); }));
     return side;
   }
 
@@ -1113,7 +1206,8 @@ namespace okaru::music {
     );
     if (!cover.empty()) {
       auto image = std::make_unique<CoverImage>();
-      image->setSize(kDetailCover * scale, kDetailCover * scale);
+      const float coverSide = (width < 560.0F * scale ? 96.0F : kDetailCover) * scale;
+      image->setSize(coverSide, coverSide);
       image->setCover(cover);
       header->addChild(std::move(image));
     }
@@ -1436,7 +1530,10 @@ namespace okaru::music {
 
     // Carátula y título: un clic abre (o cierra) el reproductor a pantalla completa.
     const float side = height - Style::spaceMd * 2.0F * scale;
-    const float infoWidth = std::clamp(width * 0.24F, 140.0F * scale, 300.0F * scale);
+    // Angosta: sin título al lado de la carátula ni barra de volumen; la de tiempo usa lo que queda.
+    const bool showInfo = width >= kSongInfoFrom * scale;
+    const bool showVolume = width >= kVolumeSliderFrom * scale;
+    const float infoWidth = showInfo ? std::clamp(width * 0.22F, 120.0F * scale, 300.0F * scale) : 0.0F;
     auto song = ui::row({.align = FlexAlign::Center, .gap = Style::spaceMd * scale});
     auto cover = std::make_unique<CoverImage>();
     cover->setSize(side, side);
@@ -1445,7 +1542,9 @@ namespace okaru::music {
     auto info = ui::column({.align = FlexAlign::Start, .gap = 2.0F * scale, .width = infoWidth});
     info->addChild(ui::label({.out = &m_nowTitle, .text = "", .fontSize = Style::fontSizeBody * scale, .fontWeight = FontWeight::SemiBold, .maxWidth = infoWidth, .maxLines = 1}));
     info->addChild(ui::label({.out = &m_nowArtist, .text = "", .fontSize = Style::fontSizeCaption * scale, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant), .maxWidth = infoWidth, .maxLines = 1}));
-    song->addChild(std::move(info));
+    if (showInfo) {
+      song->addChild(std::move(info));
+    }
     auto songArea = ui::inputArea({
         .tooltip = m_fullPlayer ? tr("apps.music.hide-player") : tr("apps.music.show-player"),
         .onClick = [this](const InputArea::PointerData&) { setFullPlayer(!m_fullPlayer); },
@@ -1509,7 +1608,10 @@ namespace okaru::music {
         })
     );
     center->addChild(std::move(buttons));
-    const float timelineWidth = std::min(560.0F * scale, std::max(160.0F * scale, width - infoWidth - 420.0F * scale));
+    // Lo que ocupan los demás: carátula y título, volumen, el botón del reproductor, márgenes y separaciones.
+    const float others = side + infoWidth + (showVolume ? 150.0F : 40.0F) * scale + 40.0F * scale
+        + Style::spaceMd * 7.0F * scale;
+    const float timelineWidth = std::clamp(width - others, 120.0F * scale, 560.0F * scale);
     center->addChild(
         ui::row(
             {.align = FlexAlign::Center, .gap = Style::spaceSm * scale, .width = timelineWidth},
@@ -1552,6 +1654,7 @@ namespace okaru::music {
             .maxValue = 100.0,
             .value = state.muted ? 0.0 : state.volume,
             .width = 110.0F * scale,
+            .visible = showVolume,
             .onValueChanged =
                 [this](double value) {
                   m_player.setVolume(value);
@@ -1588,11 +1691,16 @@ namespace okaru::music {
     if (item != m_lyricsItem) {
       resolveLyrics();
     }
-    const float pad = Style::spaceLg * 2.0F * scale;
-    const float panelWidth = std::clamp(width * 0.38F, 320.0F * scale, 520.0F * scale);
-    const float leftWidth = std::max(0.0F, width - panelWidth - pad * 3.0F);
+    // Ancho: carátula a la izquierda y panel a la derecha. Angosto (mosaico): carátula arriba y panel debajo.
+    const bool stacked = width < kStackedPlayerBelow * scale || height > width;
+    const float pad = Style::spaceLg * (stacked ? 1.0F : 2.0F) * scale;
     const float textBlock = 64.0F * scale;
-    const float side = std::max(0.0F, std::min(leftWidth, height - pad * 2.0F - textBlock));
+    const float minPanel = 240.0F * scale;
+    const float panelWidth = stacked ? width - pad * 2.0F : std::clamp(width * 0.38F, 320.0F * scale, 520.0F * scale);
+    const float leftWidth = stacked ? width - pad * 2.0F : std::max(0.0F, width - panelWidth - pad * 3.0F);
+    const float side = stacked
+        ? std::clamp(std::min(leftWidth, height * 0.36F), 0.0F, std::max(0.0F, height - pad * 3.0F - textBlock - minPanel))
+        : std::max(0.0F, std::min(leftWidth, height - pad * 2.0F - textBlock));
 
     auto root = ui::node({.width = width, .height = height, .clipChildren = true});
     // Opaco: al desvanecerse deja ver la biblioteca de debajo, no un fondo vacío.
@@ -1608,7 +1716,7 @@ namespace okaru::music {
     auto cover = std::make_unique<CoverImage>();
     cover->setSize(side, side);
     cover->setCover(track != nullptr ? track->cover : "");
-    const float top = std::round((height - side - textBlock) * 0.5F);
+    const float top = stacked ? pad : std::round((height - side - textBlock) * 0.5F);
     m_coverX = pad + std::round((leftWidth - side) * 0.5F);
     cover->setPosition(m_coverX, top);
     m_fullCover = root->addChild(std::move(cover));
@@ -1643,7 +1751,8 @@ namespace okaru::music {
     m_fullInfo = root->addChild(std::move(info));
 
     // Panel: pestañas «A continuación» y «Letra».
-    const float panelHeight = std::max(0.0F, height - pad * 2.0F);
+    const float panelTop = stacked ? top + side + textBlock + pad * 0.5F : pad;
+    const float panelHeight = std::max(0.0F, height - panelTop - pad);
     auto panel = ui::column({
         .align = FlexAlign::Stretch,
         .gap = Style::spaceSm * scale,
@@ -1676,7 +1785,7 @@ namespace okaru::music {
     const float inner = panelWidth - Style::spaceMd * 2.0F * scale;
     panel->addChild(m_playerTab == PlayerTab::Queue ? buildQueuePanel(inner, scale) : buildLyricsPanel(inner, scale));
     m_panelX = width - panelWidth - pad;
-    panel->setPosition(m_panelX, pad);
+    panel->setPosition(m_panelX, panelTop);
     m_fullPanel = root->addChild(std::move(panel));
     return root;
   }
@@ -1780,39 +1889,27 @@ namespace okaru::music {
         .width = width,
         .flexGrow = 1.0F,
     });
-    // Renglones centrados, cada uno su etiqueta y colocados a mano: así la animación los mueve sin que el layout
-    // los devuelva a su sitio. Las líneas vacías separan estrofas. Sincronizada: la que suena resalta.
-    const float lineWidth = width - Style::spaceMd * scale;
-    const float gap = Style::spaceXs * scale;
-    auto block = ui::node({.width = lineWidth});
-    // Margen arriba y abajo: la primera y la última línea también pueden quedar en el centro.
-    float y = m_lyrics.synced ? 160.0F * scale : Style::spaceMd * scale;
-    Renderer* renderer = m_app.renderer();
+    // Las líneas vacías separan estrofas. Sincronizada: margen arriba y abajo para que la primera y la última
+    // también puedan quedar al centro, y las que no suenan atenuadas.
+    const bool synced = m_lyrics.synced;
+    auto block = std::make_unique<LyricsBlock>(
+        width - Style::spaceMd * scale, synced ? 160.0F * scale : Style::spaceMd * scale,
+        Style::spaceXs * scale * (synced ? 3.0F : 1.0F), Style::spaceLg * scale, Style::fontSizeTitle * scale,
+        Style::fontSizeTitle * kLyricGrow * scale
+    );
+    const ColorSpec color =
+        synced ? colorSpecFromRole(ColorRole::OnSurfaceVariant, kLyricDim) : colorSpecFromRole(ColorRole::OnSurface);
     for (const LyricLine& lyric : m_lyrics.lines) {
       if (lyric.text.empty()) {
         m_lyricLabelOf.push_back(-1);
-        y += Style::spaceLg * scale;
+        block->addSpacer();
         continue;
       }
-      auto line = ui::label({
-          .text = lyric.text,
-          .fontSize = Style::fontSizeTitle * scale,
-          .fontWeight = FontWeight::SemiBold,
-          .color = m_lyrics.synced ? colorSpecFromRole(ColorRole::OnSurfaceVariant, kLyricDim)
-                                   : colorSpecFromRole(ColorRole::OnSurface),
-          .maxWidth = lineWidth,
-          .textAlign = TextAlign::Center,
-      });
-      if (renderer != nullptr) {
-        line->layout(*renderer);
-      }
-      line->setPosition(std::round((lineWidth - line->width()) * 0.5F), y);
-      m_lyricTops.push_back(y);
-      y += line->height() + gap * (m_lyrics.synced ? 3.0F : 1.0F);
-      m_lyricLabelOf.push_back(static_cast<int>(m_lyricLines.size()));
-      m_lyricLines.push_back(block->addChild(std::move(line)));
+      m_lyricLabelOf.push_back(static_cast<int>(block->lineCount()));
+      block->addLine(lyric.text, color);
     }
-    block->setSize(lineWidth, y + (m_lyrics.synced ? 160.0F * scale : Style::spaceLg * scale));
+    block->onArranged = [this] { centerLyricLine(); };
+    m_lyricsBlock = block.get();
     scroll->content()->addChild(std::move(block));
     return scroll;
   }
@@ -1871,52 +1968,62 @@ namespace okaru::music {
   }
 
   void MusicWindow::updateLyricsHighlight() {
-    if (!m_lyrics.synced || m_lyricLines.empty() || m_lyricLabelOf.size() != m_lyrics.lines.size()) {
+    if (!m_lyrics.synced || m_lyricsBlock == nullptr || m_lyricLabelOf.size() != m_lyrics.lines.size()) {
       return;
     }
     const long line = currentLine(m_lyrics, m_player.state().position);
     if (line == m_lyricIndex) {
       return;
     }
-    const auto labelAt = [&](long index) -> Label* {
-      if (index < 0 || static_cast<std::size_t>(index) >= m_lyricLabelOf.size()) {
-        return nullptr;
-      }
-      const int label = m_lyricLabelOf[static_cast<std::size_t>(index)];
-      return label < 0 ? nullptr : static_cast<Label*>(m_lyricLines[static_cast<std::size_t>(label)]);
+    const auto labelAt = [&](long index) -> long {
+      return index < 0 || static_cast<std::size_t>(index) >= m_lyricLabelOf.size()
+          ? -1
+          : m_lyricLabelOf[static_cast<std::size_t>(index)];
     };
-    if (Label* old = labelAt(m_lyricIndex); old != nullptr) {
-      old->setColor(colorSpecFromRole(ColorRole::OnSurfaceVariant, kLyricDim));
+    if (const long old = labelAt(m_lyricIndex); old >= 0) {
+      m_lyricsBlock->line(static_cast<std::size_t>(old))->setColor(colorSpecFromRole(ColorRole::OnSurfaceVariant, kLyricDim));
+      m_lyricsBlock->setBig(static_cast<std::size_t>(old), false);
     }
     m_lyricIndex = line;
-    Label* now = labelAt(line);
-    if (now == nullptr) {
-      m_app.invalidate();
-      return;
-    }
-    // Solo color (sin escala: escalar el texto ya rasterizado lo deja borroso).
-    now->setColor(colorSpecFromRole(ColorRole::Primary));
-    // Desliza la letra para que la línea que suena quede al centro.
-    if (m_lyricsView != nullptr) {
-      const float target = std::max(0.0F, now->y() + now->height() * 0.5F - m_lyricsView->height() * 0.5F);
-      const float from = m_lyricsScroll.offset;
-      if (AnimationManager* anim = m_lyricsView->animationManager(); anim != nullptr) {
-        anim->cancelForOwner(&m_lyricsScroll);
-        anim->animate(
-            0.0F, 1.0F, 420.0F, Easing::EaseOutCubic,
-            [this, from, target](float t) {
-              if (m_lyricsView != nullptr) {
-                m_lyricsView->setScrollOffset(from + (target - from) * t);
-                m_app.requestFrame();
-              }
-            },
-            {}, &m_lyricsScroll
-        );
-      } else {
-        m_lyricsView->setScrollOffset(target);
-      }
+    if (const long now = labelAt(line); now >= 0) {
+      // Más grande y en el color principal: se vuelve a dibujar a ese tamaño (nítida, sin escalar).
+      m_lyricsBlock->line(static_cast<std::size_t>(now))->setColor(colorSpecFromRole(ColorRole::Primary));
+      m_lyricsBlock->setBig(static_cast<std::size_t>(now), true);
+      m_centerLyric = true; // al acomodarse, se desliza para dejarla al centro
     }
     m_app.invalidate();
+  }
+
+  void MusicWindow::centerLyricLine() {
+    if (!m_centerLyric || m_lyricsBlock == nullptr || m_lyricsView == nullptr) {
+      return;
+    }
+    m_centerLyric = false;
+    const long label = m_lyricIndex >= 0 && static_cast<std::size_t>(m_lyricIndex) < m_lyricLabelOf.size()
+        ? m_lyricLabelOf[static_cast<std::size_t>(m_lyricIndex)]
+        : -1;
+    if (label < 0) {
+      return;
+    }
+    const float target =
+        std::max(0.0F, m_lyricsBlock->centerOf(static_cast<std::size_t>(label)) - m_lyricsView->height() * 0.5F);
+    const float from = m_lyricsScroll.offset;
+    AnimationManager* anim = m_lyricsView->animationManager();
+    if (anim == nullptr) {
+      m_lyricsView->setScrollOffset(target);
+      return;
+    }
+    anim->cancelForOwner(&m_lyricsScroll);
+    anim->animate(
+        0.0F, 1.0F, 420.0F, Easing::EaseOutCubic,
+        [this, from, target](float t) {
+          if (m_lyricsView != nullptr) {
+            m_lyricsView->setScrollOffset(from + (target - from) * t);
+            m_app.requestFrame();
+          }
+        },
+        {}, &m_lyricsScroll
+    );
   }
 
   // ── Ajustes ───────────────────────────────────────────────────────────────────────────────────────
@@ -2023,7 +2130,7 @@ namespace okaru::music {
               .text = tr(base + ".hint"),
               .fontSize = Style::fontSizeCaption * scale,
               .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
-              .maxWidth = width - 200.0F * scale,
+              .maxWidth = std::max(120.0F * scale, width - 200.0F * scale),
           })
       );
       row->addChild(std::move(text));
@@ -2087,7 +2194,7 @@ namespace okaru::music {
               .text = tr(key + ".hint"),
               .fontSize = Style::fontSizeCaption * scale,
               .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
-              .maxWidth = inner - 260.0F * scale,
+              .maxWidth = std::max(inner * 0.5F, inner - 260.0F * scale),
           })
       );
       row->addChild(std::move(text));
