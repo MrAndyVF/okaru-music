@@ -471,43 +471,43 @@ namespace okaru::music {
 
   // ── Bloque de letra ──────────────────────────────────────────────────────────────────────────────
 
-  // Renglones centrados que se acomodan solos en cada maquetado: la línea resaltada puede crecer (se vuelve a
-  // dibujar más grande, nítida) y las de abajo se corren; la animación de entrada mueve cada renglón con un
-  // desplazamiento propio que el maquetado respeta.
+  // Renglones centrados que se acomodan solos en cada maquetado. Cada línea tiene dos versiones dibujadas una sola
+  // vez: la normal y la resaltada (más grande, otro color). Resaltar es un fundido cruzado con escala entre ambas
+  // (solo transformaciones: fluido, sin redibujar texto en cada cuadro) y la altura del renglón pasa de una a otra;
+  // al terminar se ve la resaltada a escala 1, nítida. La entrada mueve cada renglón con su propio desplazamiento.
   class LyricsBlock final : public Node {
   public:
-    LyricsBlock(float width, float margin, float gap, float spacer, float fontSize, float bigFontSize)
+    LyricsBlock(float width, float margin, float gap, float spacer, float fontSize, float bigFontSize, ColorSpec color)
         : m_width(width), m_margin(margin), m_gap(gap), m_spacer(spacer), m_fontSize(fontSize),
-          m_bigFontSize(bigFontSize) {}
+          m_bigFontSize(bigFontSize), m_color(color) {}
 
-    void addLine(const std::string& text, const ColorSpec& color) {
-      auto label = ui::label({
-          .text = text,
-          .fontSize = m_fontSize,
-          .fontWeight = FontWeight::SemiBold,
-          .color = color,
-          .maxWidth = m_width,
-          .textAlign = TextAlign::Center,
-      });
-      m_labels.push_back(static_cast<Label*>(addChild(std::move(label))));
-      m_offsets.push_back(0.0F);
-      m_centers.push_back(0.0F);
+    void addLine(const std::string& text) {
+      Line line;
+      line.text = text;
+      line.base = static_cast<Label*>(addChild(makeLabel(text, m_fontSize, m_color)));
+      m_lines.push_back(std::move(line));
       m_entries.push_back(false);
     }
     void addSpacer() { m_entries.push_back(true); }
 
-    [[nodiscard]] std::size_t lineCount() const noexcept { return m_labels.size(); }
-    [[nodiscard]] Label* line(std::size_t index) const { return m_labels[index]; }
-    [[nodiscard]] float centerOf(std::size_t index) const { return m_centers[index]; }
+    [[nodiscard]] std::size_t lineCount() const noexcept { return m_lines.size(); }
+    [[nodiscard]] float centerOf(std::size_t index) const { return m_lines[index].center; }
     void setOffset(std::size_t index, float dy) {
-      m_offsets[index] = dy;
+      m_lines[index].offset = dy;
       markLayoutDirty();
     }
-    // 0 = tamaño normal, 1 = resaltada (admite el rebote: algo más de 1 y vuelve).
+    void setAlpha(std::size_t index, float alpha) {
+      m_lines[index].alpha = alpha;
+      markLayoutDirty();
+    }
+    // 0 = normal, 1 = resaltada (con el rebote pasa un poco de 1 y vuelve).
     void setGrow(std::size_t index, float grow) {
-      // En medios píxeles: no rasteriza la fuente en cada fracción.
-      const float size = std::round((m_fontSize + (m_bigFontSize - m_fontSize) * grow) * 2.0F) * 0.5F;
-      m_labels[index]->setFontSize(std::max(m_fontSize, size));
+      Line& line = m_lines[index];
+      line.grow = grow;
+      if (line.big == nullptr && grow > 0.0F) {
+        // La versión resaltada se dibuja la primera vez que hace falta.
+        line.big = static_cast<Label*>(addChild(makeLabel(line.text, m_bigFontSize, colorSpecFromRole(ColorRole::Primary))));
+      }
       markLayoutDirty();
     }
     // Tras cada acomodo (ahí ya se sabe dónde quedó la línea resaltada).
@@ -526,7 +526,29 @@ namespace okaru::music {
     }
 
   private:
+    struct Line {
+      std::string text;
+      Label* base = nullptr;
+      Label* big = nullptr;
+      float grow = 0.0F;
+      float offset = 0.0F;
+      float alpha = 1.0F;
+      float center = 0.0F;
+    };
+
+    std::unique_ptr<Label> makeLabel(const std::string& text, float size, const ColorSpec& color) const {
+      return ui::label({
+          .text = text,
+          .fontSize = size,
+          .fontWeight = FontWeight::SemiBold,
+          .color = color,
+          .maxWidth = m_width,
+          .textAlign = TextAlign::Center,
+      });
+    }
+
     void arrange(Renderer& renderer) {
+      const float ratio = m_bigFontSize / m_fontSize;
       float y = m_margin;
       std::size_t index = 0;
       for (const bool spacer : m_entries) {
@@ -534,13 +556,31 @@ namespace okaru::music {
           y += m_spacer;
           continue;
         }
-        Label* label = m_labels[index];
-        label->setMaxWidth(m_width);
-        label->layout(renderer);
-        label->setPosition(std::round((m_width - label->width()) * 0.5F), y + m_offsets[index]);
-        m_centers[index] = y + label->height() * 0.5F;
-        y += label->height() + m_gap;
-        ++index;
+        Line& line = m_lines[index++];
+        line.base->layout(renderer);
+        const float baseHeight = line.base->height();
+        float bigHeight = baseHeight;
+        if (line.big != nullptr) {
+          line.big->layout(renderer);
+          bigHeight = line.big->height();
+        }
+        const float g = line.grow;
+        const float shown = std::clamp(g, 0.0F, 1.0F);
+        const float height = baseHeight + (bigHeight - baseHeight) * g;
+        const float centerY = y + height * 0.5F + line.offset;
+        // La normal crece hacia el tamaño de la resaltada y se desvanece; la resaltada llega desde el tamaño normal.
+        line.base->setScale(1.0F + (ratio - 1.0F) * g);
+        line.base->setOpacity(line.alpha * (1.0F - shown));
+        line.base->setVisible(shown < 1.0F);
+        line.base->setPosition(std::round((m_width - line.base->width()) * 0.5F), centerY - baseHeight * 0.5F);
+        if (line.big != nullptr) {
+          line.big->setScale(1.0F / ratio + (1.0F - 1.0F / ratio) * g);
+          line.big->setOpacity(line.alpha * shown);
+          line.big->setVisible(shown > 0.0F);
+          line.big->setPosition(std::round((m_width - line.big->width()) * 0.5F), centerY - bigHeight * 0.5F);
+        }
+        line.center = y + height * 0.5F;
+        y += height + m_gap;
       }
       m_height = y + m_margin;
       setSize(m_width, m_height);
@@ -552,11 +592,10 @@ namespace okaru::music {
     float m_spacer;
     float m_fontSize;
     float m_bigFontSize;
+    ColorSpec m_color;
     float m_height = 0.0F;
     std::vector<bool> m_entries; // true = separación entre estrofas
-    std::vector<Label*> m_labels;
-    std::vector<float> m_offsets;
-    std::vector<float> m_centers;
+    std::vector<Line> m_lines;
   };
 
   // ── Ventana ──────────────────────────────────────────────────────────────────────────────────────
@@ -878,7 +917,7 @@ namespace okaru::music {
           const float local = std::clamp((ms - start) / kLine, 0.0F, 1.0F);
           const float eased = applyEasing(Easing::EaseOutBack, local);
           m_lyricsBlock->setOffset(i, (1.0F - eased) * 28.0F * s);
-          m_lyricsBlock->line(i)->setOpacity(std::clamp(local * 1.8F, 0.0F, 1.0F));
+          m_lyricsBlock->setAlpha(i, std::clamp(local * 1.8F, 0.0F, 1.0F));
         }
         m_app.invalidate();
       };
@@ -2101,13 +2140,13 @@ namespace okaru::music {
     // Las líneas vacías separan estrofas. Sincronizada: margen arriba y abajo para que la primera y la última
     // también puedan quedar al centro, y las que no suenan atenuadas.
     const bool synced = m_lyrics.synced;
+    const ColorSpec color =
+        synced ? colorSpecFromRole(ColorRole::OnSurfaceVariant, kLyricDim) : colorSpecFromRole(ColorRole::OnSurface);
     auto block = std::make_unique<LyricsBlock>(
         width - Style::spaceMd * scale, synced ? 160.0F * scale : Style::spaceMd * scale,
         Style::spaceXs * scale * (synced ? 3.0F : 1.0F), Style::spaceLg * scale, Style::fontSizeTitle * scale,
-        Style::fontSizeTitle * kLyricGrow * scale
+        Style::fontSizeTitle * kLyricGrow * scale, color
     );
-    const ColorSpec color =
-        synced ? colorSpecFromRole(ColorRole::OnSurfaceVariant, kLyricDim) : colorSpecFromRole(ColorRole::OnSurface);
     for (const LyricLine& lyric : m_lyrics.lines) {
       if (lyric.text.empty()) {
         m_lyricLabelOf.push_back(-1);
@@ -2115,7 +2154,7 @@ namespace okaru::music {
         continue;
       }
       m_lyricLabelOf.push_back(static_cast<int>(block->lineCount()));
-      block->addLine(lyric.text, color);
+      block->addLine(lyric.text);
     }
     block->onArranged = [this] { centerLyricLine(); };
     m_lyricsBlock = block.get();
@@ -2241,12 +2280,7 @@ namespace okaru::music {
     const long to = labelAt(line);
     m_shrinking = from;
     m_lyricIndex = line;
-    if (from >= 0) {
-      m_lyricsBlock->line(static_cast<std::size_t>(from))->setColor(colorSpecFromRole(ColorRole::OnSurfaceVariant, kLyricDim));
-    }
-    if (to >= 0) {
-      m_lyricsBlock->line(static_cast<std::size_t>(to))->setColor(colorSpecFromRole(ColorRole::Primary));
-    }
+
     m_scrollFrom = m_lyricsScroll.offset;
     m_lyricT = 0.0F;
     m_centerLyric = true; // sin línea (antes de la primera o entre estrofas) vuelve arriba
