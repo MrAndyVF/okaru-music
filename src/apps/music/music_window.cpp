@@ -542,30 +542,24 @@ namespace okaru::music {
   // ── Navegación y reproducción ─────────────────────────────────────────────────────────────────────
 
   void MusicWindow::setFullPlayer(bool open) {
+    AnimationManager* anim = m_fullRoot != nullptr ? m_fullRoot->animationManager() : nullptr;
+    // Clic a mitad del cierre: vuelve desde donde está, sin esperar a que termine.
+    if (open && m_closing && anim != nullptr) {
+      m_closing = false;
+      settleFullPlayer(*anim, true, {});
+      return;
+    }
     if (open == m_fullPlayer) {
       return;
     }
-    AnimationManager* anim = m_fullRoot != nullptr ? m_fullRoot->animationManager() : nullptr;
     if (!open && anim != nullptr && !m_closing) {
-      // Se va deslizándose hacia abajo y luego vuelve la biblioteca.
+      // Se va deslizándose hacia abajo desde donde esté (también a mitad de la apertura) y vuelve la biblioteca.
       m_closing = true;
-      anim->cancelForOwner(this);
-      anim->animate(
-          0.0F, 1.0F, 200.0F, Easing::EaseInQuad,
-          [this](float t) {
-            if (m_fullRoot != nullptr) {
-              m_fullRoot->setPosition(0.0F, m_fullY + t * 80.0F * m_animScale);
-              m_fullRoot->setOpacity(1.0F - t);
-              m_app.requestFrame();
-            }
-          },
-          [this] {
-            m_closing = false;
-            m_fullPlayer = false;
-            m_app.requestRebuild();
-          },
-          this
-      );
+      settleFullPlayer(*anim, false, [this] {
+        m_closing = false;
+        m_fullPlayer = false;
+        m_app.requestRebuild();
+      });
       return;
     }
     m_fullPlayer = open;
@@ -573,6 +567,56 @@ namespace okaru::music {
     m_animateOpen = open;
     m_animateLyrics = open && m_playerTab == PlayerTab::Lyrics;
     m_app.requestRebuild();
+  }
+
+  void MusicWindow::settleFullPlayer(AnimationManager& anim, bool visible, std::function<void()> done) {
+    // Parte del estado actual de cada nodo (puede estar a mitad de otra animación) y llega a visible u oculto.
+    anim.cancelForOwner(this);
+    const float s = m_animScale;
+    struct From {
+      float rootY, rootAlpha, panelX, coverX, coverAlpha, infoX, infoAlpha;
+    };
+    const From from{
+        m_fullRoot->y(),
+        m_fullRoot->opacity(),
+        m_fullPanel != nullptr ? m_fullPanel->x() : 0.0F,
+        m_fullCover != nullptr ? m_fullCover->x() : 0.0F,
+        m_fullCover != nullptr ? m_fullCover->opacity() : 1.0F,
+        m_fullInfo != nullptr ? m_fullInfo->x() : 0.0F,
+        m_fullInfo != nullptr ? m_fullInfo->opacity() : 1.0F,
+    };
+    const float toY = visible ? m_fullY : m_fullY + 80.0F * s;
+    const float toAlpha = visible ? 1.0F : 0.0F;
+    const auto lerp = [](float a, float b, float t) { return a + (b - a) * t; };
+    // Lo que falta recorrer marca la duración: un clic temprano no espera la animación entera.
+    const float remaining = std::abs(toAlpha - from.rootAlpha);
+    const float duration = visible ? 160.0F + 280.0F * remaining : 90.0F + 130.0F * std::max(remaining, 0.3F);
+    anim.animate(
+        0.0F, 1.0F, duration, visible ? Easing::EaseOutBack : Easing::EaseInQuad,
+        [this, from, toY, toAlpha, visible, lerp](float t) {
+          if (m_fullRoot == nullptr) {
+            return;
+          }
+          const float a = std::clamp(t, 0.0F, 1.0F);
+          m_fullRoot->setPosition(0.0F, lerp(from.rootY, toY, t));
+          m_fullRoot->setOpacity(std::clamp(lerp(from.rootAlpha, toAlpha, a), 0.0F, 1.0F));
+          if (visible) { // al volver, lo que quedó corrido regresa a su sitio
+            if (m_fullPanel != nullptr) {
+              m_fullPanel->setPosition(lerp(from.panelX, m_panelX, t), m_fullPanel->y());
+            }
+            if (m_fullCover != nullptr) {
+              m_fullCover->setPosition(lerp(from.coverX, m_coverX, t), m_fullCover->y());
+              m_fullCover->setOpacity(lerp(from.coverAlpha, 1.0F, a));
+            }
+            if (m_fullInfo != nullptr) {
+              m_fullInfo->setPosition(lerp(from.infoX, m_infoX, t), m_fullInfo->y());
+              m_fullInfo->setOpacity(lerp(from.infoAlpha, 1.0F, a));
+            }
+          }
+          m_app.requestFrame();
+        },
+        std::move(done), this
+    );
   }
 
   void MusicWindow::startAnimations() {
@@ -606,7 +650,7 @@ namespace okaru::music {
         m_app.requestFrame();
       };
       apply(0.0F);
-      anim->animate(0.0F, 1.0F, open ? 520.0F : 440.0F, Easing::EaseOutBack, apply, {}, this);
+      anim->animate(0.0F, 1.0F, open ? 380.0F : 360.0F, Easing::EaseOutBack, apply, {}, this);
     }
     if (m_animateLyrics && !m_lyricLines.empty()) {
       // Renglón por renglón, cada uno sube con rebote un poco después del anterior.

@@ -13,11 +13,13 @@
 #include "ui/controls/scroll_view.h"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+class AnimationManager;
 class Button;
 class Input;
 class Label;
@@ -82,6 +84,8 @@ namespace okaru::music {
     void setFullPlayer(bool open);
     // Entrada con rebote del reproductor completo, de la canción nueva y de la letra (tras construir la escena).
     void startAnimations();
+    // Lleva el reproductor completo a visible u oculto desde donde esté ahora (interrumpible).
+    void settleFullPlayer(AnimationManager& anim, bool visible, std::function<void()> done);
     void open(Detail detail);
     void back();
     void playTracks(const std::vector<std::size_t>& tracks, std::size_t start, bool shuffle);
