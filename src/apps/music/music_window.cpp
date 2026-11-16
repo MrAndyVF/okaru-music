@@ -539,24 +539,20 @@ namespace okaru::music {
         y += height + m_gap;
         ++index;
       }
-      m_height = y + m_margin;
-      setSize(m_width, m_height);
+      // Solo si cambia de verdad: cambiar el tamaño vuelve a maquetar, y un maquetado por paso traba la animación.
+      const float height = y + m_margin;
+      if (std::abs(height - m_height) > 0.5F) {
+        m_height = height;
+        setSize(m_width, m_height);
+      }
     }
-
-    // Tras cada maquetado (ahí ya se sabe dónde quedó la línea resaltada).
-    std::function<void()> onArranged;
 
   protected:
     LayoutSize doMeasure(Renderer& renderer, const LayoutConstraints& /*constraints*/) override {
       measure(renderer);
       return {m_width, m_height};
     }
-    void doLayout(Renderer& renderer) override {
-      measure(renderer);
-      if (onArranged) {
-        onArranged();
-      }
-    }
+    void doLayout(Renderer& renderer) override { measure(renderer); }
 
   private:
     static constexpr float kFadeStep = 0.09F; // atenuación por línea de distancia
@@ -584,7 +580,11 @@ namespace okaru::music {
       });
     }
 
+    // Las etiquetas no cambian de texto ni de ancho: se miden una vez.
     void measure(Renderer& renderer) {
+      if (m_measured) {
+        return;
+      }
       for (Line& line : m_lines) {
         line.base->layout(renderer);
         line.baseHeight = line.base->height();
@@ -2173,7 +2173,6 @@ namespace okaru::music {
       m_lyricLabelOf.push_back(static_cast<int>(block->lineCount()));
       block->addLine(lyric.text);
     }
-    block->onArranged = [this] { centerLyricLine(); };
     m_lyricsBlock = block.get();
     scroll->content()->addChild(std::move(block));
     return scroll;
