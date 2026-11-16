@@ -412,7 +412,7 @@ namespace okaru::music {
                         fs::path(FileUtils::stateDir()) / "music.db",
                         fs::path(g_get_user_cache_dir()) / "okaru" / "music" / "covers"
                     ),
-        m_state(loadState(statePath())) {
+        m_online(app), m_state(loadState(statePath())) {
     m_player.setOnChange([this](bool structural) { onPlayerChange(structural); });
     m_app.setBuild([this](float w, float h, float s) { return build(w, h, s); });
     m_app.setKeyHandler([this](const KeyboardEvent& event) { return onKey(event); });
@@ -439,8 +439,9 @@ namespace okaru::music {
     m_player.setVolume(m_state.volume);
     m_player.setShuffle(m_state.shuffle);
     m_player.setRepeat(m_state.repeat);
+    applySettings();
     setModel(m_library.load());
-    if (!m_state.queue.empty()) {
+    if (!m_state.queue.empty() && m_state.settings.resume) {
       m_player.playQueue(m_state.queue, m_state.current, true); // queda en pausa donde estaba
     }
     if (auto* bus = m_app.sessionBus(); bus != nullptr) {
@@ -457,7 +458,12 @@ namespace okaru::music {
         kLog.warn("MPRIS unavailable: {}", e.what());
       }
     }
-    rescan();
+    // Biblioteca vacía: siempre se lee; si no, solo si está activado buscar cambios al abrir.
+    if (m_model.tracks.empty() || m_state.settings.scanOnStart) {
+      rescan();
+    } else {
+      fetchMissingCovers();
+    }
   }
 
   MusicWindow::~MusicWindow() = default;
@@ -475,13 +481,14 @@ namespace okaru::music {
     m_detail = {};
     m_sorted.clear();
     m_shownItem.clear();
+    m_lyricsItem.clear(); // las canciones se rehicieron: la letra se vuelve a resolver
     m_app.requestRebuild();
   }
 
   void MusicWindow::rescan() {
     m_progress = {};
     m_library.scan(
-        m_state.folders,
+        m_state.folders, m_state.settings.covers,
         [this](Library::Progress progress) {
           m_progress = progress;
           m_app.requestRebuild();
@@ -489,11 +496,11 @@ namespace okaru::music {
         [this](Model model) {
           // Sin cambios no se reconstruye (no se pierde el detalle abierto).
           const bool same = model.tracks.size() == m_model.tracks.size() && m_progress.updated == 0;
-          if (same) {
-            m_app.requestRebuild();
-            return;
+          if (!same) {
+            setModel(std::move(model));
           }
-          setModel(std::move(model));
+          m_app.requestRebuild();
+          fetchMissingCovers();
         }
     );
     m_app.requestRebuild();
@@ -799,6 +806,10 @@ namespace okaru::music {
   void MusicWindow::refreshNowPlaying() {
     const auto& state = m_player.state();
     const std::string& item = m_player.currentItem();
+    if (item != m_lyricsItem) {
+      resolveLyrics();
+    }
+    updateLyricsHighlight();
     if (item != m_shownItem && (m_nowTitle != nullptr)) {
       m_shownItem = item;
       const Track* track = trackForItem(item);
@@ -855,6 +866,9 @@ namespace okaru::music {
     m_fullRoot = m_fullCover = m_fullInfo = m_fullPanel = nullptr;
     m_lyricLines.clear();
     m_lyricTops.clear();
+    m_lyricsView = nullptr;
+    m_lyricLabelOf.clear();
+    m_crossfadeLabel = nullptr;
     m_animScale = scale;
 
     const float header = kHeaderHeight * scale;
@@ -991,48 +1005,15 @@ namespace okaru::music {
       );
     }
     side->addChild(ui::node({.flexGrow = 1.0F}));
-
-    // Carpetas de música.
-    side->addChild(
-        ui::label({
-            .text = tr("apps.music.folders"),
-            .fontSize = Style::fontSizeCaption * scale,
-            .fontWeight = FontWeight::SemiBold,
-            .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
-        })
-    );
-    for (std::size_t i = 0; i < m_state.folders.size(); ++i) {
-      const fs::path& folder = m_state.folders[i];
-      auto row = ui::row({.align = FlexAlign::Center, .gap = Style::spaceXs * scale, .fillWidth = true});
-      row->addChild(ui::glyph({.glyph = "folder", .glyphSize = 14.0F * scale, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant)}));
-      row->addChild(
-          ui::label({
-              .text = folder.filename().empty() ? folder.string() : folder.filename().string(),
-              .fontSize = Style::fontSizeCaption * scale,
-              .maxLines = 1,
-              .ellipsize = TextEllipsize::Middle,
-              .flexGrow = 1.0F,
-          })
-      );
-      row->addChild(
-          ui::button({
-              .glyph = "x",
-              .glyphSize = 12.0F * scale,
-              .controlHeight = 24.0F * scale,
-              .variant = ButtonVariant::Ghost,
-              .tooltip = tr("apps.music.remove-folder", "folder", folder.string()),
-              .onClick = [this, i] { removeFolder(i); },
-          })
-      );
-      side->addChild(std::move(row));
-    }
+    const bool settings = m_view == View::Settings && m_query.empty();
     side->addChild(
         ui::button({
-            .text = tr("apps.music.add-folder"),
-            .glyph = "folder-plus",
+            .text = tr("apps.music.settings.title"),
+            .glyph = "settings",
+            .selected = settings,
             .contentAlign = ButtonContentAlign::Start,
-            .variant = ButtonVariant::Ghost,
-            .onClick = [this] { addFolder(); },
+            .variant = settings ? ButtonVariant::Secondary : ButtonVariant::Ghost,
+            .onClick = [this] { show(View::Settings); },
         })
     );
     return side;
@@ -1199,6 +1180,8 @@ namespace okaru::music {
       case View::Artists:
       case View::Genres:
         return {"apps.music.sort.name", "apps.music.sort.songs"};
+      case View::Settings:
+        break;
       }
       return {};
     }
@@ -1225,6 +1208,8 @@ namespace okaru::music {
         break;
       case View::Genres:
         order = sortedGenres(m_model, static_cast<NameSort>(sort), reverse);
+        break;
+      case View::Settings:
         break;
       }
       it = m_sorted.emplace(key, std::move(order)).first;
@@ -1302,6 +1287,9 @@ namespace okaru::music {
         content->addChild(buildTracks(std::move(results), false, scale));
       }
       return content;
+    }
+    if (m_view == View::Settings) {
+      return buildSettings(width, height, scale);
     }
     if (m_model.tracks.empty()) {
       return buildEmpty(width, height, scale);
@@ -1427,6 +1415,8 @@ namespace okaru::music {
       }));
       break;
     }
+    case View::Settings:
+      break;
     }
     return content;
   }
@@ -1587,38 +1577,6 @@ namespace okaru::music {
 
   namespace {
 
-    // Quita las marcas de tiempo de una letra LRC ("[01:23.45]") y las etiquetas ([ar:…]): queda el texto.
-    std::string plainLyrics(const std::string& lyrics) {
-      std::string out;
-      std::size_t start = 0;
-      while (start <= lyrics.size()) {
-        const std::size_t end = std::min(lyrics.find('\n', start), lyrics.size());
-        std::string line = lyrics.substr(start, end - start);
-        bool tagOnly = false;
-        while (line.starts_with('[')) {
-          const std::size_t close = line.find(']');
-          if (close == std::string::npos) {
-            break;
-          }
-          const bool timestamp = close > 1 && std::isdigit(static_cast<unsigned char>(line[1])) != 0;
-          line.erase(0, close + 1);
-          tagOnly = !timestamp && line.empty();
-        }
-        if (!line.empty() && line.back() == '\r') {
-          line.pop_back();
-        }
-        if (!tagOnly) {
-          out += line;
-          out += '\n';
-        }
-        start = end + 1;
-      }
-      while (!out.empty() && (out.back() == '\n' || out.back() == ' ')) {
-        out.pop_back();
-      }
-      return out;
-    }
-
   } // namespace
 
   std::unique_ptr<Node> MusicWindow::buildFullPlayer(float width, float height, float scale) {
@@ -1626,6 +1584,9 @@ namespace okaru::music {
     const Track* track = currentTrack();
     const std::string& item = m_player.currentItem();
     m_fullPlayerItem = item;
+    if (item != m_lyricsItem) {
+      resolveLyrics();
+    }
     const float pad = Style::spaceLg * 2.0F * scale;
     const float panelWidth = std::clamp(width * 0.38F, 320.0F * scale, 520.0F * scale);
     const float leftWidth = std::max(0.0F, width - panelWidth - pad * 3.0F);
@@ -1780,9 +1741,12 @@ namespace okaru::music {
   }
 
   std::unique_ptr<Node> MusicWindow::buildLyricsPanel(float width, float scale) {
-    const Track* track = currentTrack();
-    const std::string lyrics = track != nullptr ? plainLyrics(track->lyrics) : std::string();
-    if (lyrics.empty()) {
+    m_lyricsView = nullptr;
+    m_lyricLabelOf.clear();
+    m_lyricIndex = -1;
+    if (m_lyrics.empty()) {
+      const Track* track = currentTrack();
+      const bool searching = track != nullptr && m_lyricsFetching.contains(lyricsCachePath(*track).string());
       auto empty = ui::column({
           .align = FlexAlign::Center,
           .justify = FlexJustify::Center,
@@ -1790,12 +1754,16 @@ namespace okaru::music {
           .width = width,
           .flexGrow = 1.0F,
       });
-      empty->addChild(
-          ui::glyph({.glyph = "microphone-2", .glyphSize = 40.0F * scale, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant)})
-      );
+      if (searching) {
+        empty->addChild(ui::spinner({}));
+      } else {
+        empty->addChild(ui::glyph(
+            {.glyph = "microphone-2", .glyphSize = 40.0F * scale, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant)}
+        ));
+      }
       empty->addChild(
           ui::label({
-              .text = tr("apps.music.no-lyrics"),
+              .text = searching ? tr("apps.music.searching-lyrics") : tr("apps.music.no-lyrics"),
               .fontSize = Style::fontSizeBody * scale,
               .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
               .maxWidth = width,
@@ -1805,31 +1773,31 @@ namespace okaru::music {
       return empty;
     }
     auto scroll = ui::scrollView({
+        .out = &m_lyricsView,
         .state = &m_lyricsScroll,
         .contentScale = scale,
         .width = width,
         .flexGrow = 1.0F,
     });
     // Renglones centrados, cada uno su etiqueta y colocados a mano: así la animación los mueve sin que el layout
-    // los devuelva a su sitio. Las líneas vacías separan estrofas.
+    // los devuelva a su sitio. Las líneas vacías separan estrofas. Sincronizada: la que suena resalta.
     const float lineWidth = width - Style::spaceMd * scale;
     const float gap = Style::spaceXs * scale;
     auto block = ui::node({.width = lineWidth});
-    float y = Style::spaceMd * scale;
+    // Margen arriba y abajo: la primera y la última línea también pueden quedar en el centro.
+    float y = m_lyrics.synced ? 160.0F * scale : Style::spaceMd * scale;
     Renderer* renderer = m_app.renderer();
-    std::size_t start = 0;
-    while (start <= lyrics.size()) {
-      const std::size_t end = std::min(lyrics.find('\n', start), lyrics.size());
-      const std::string text = lyrics.substr(start, end - start);
-      start = end + 1;
-      if (text.empty()) {
+    for (const LyricLine& lyric : m_lyrics.lines) {
+      if (lyric.text.empty()) {
+        m_lyricLabelOf.push_back(-1);
         y += Style::spaceLg * scale;
         continue;
       }
       auto line = ui::label({
-          .text = text,
+          .text = lyric.text,
           .fontSize = Style::fontSizeTitle * scale,
           .fontWeight = FontWeight::SemiBold,
+          .color = colorSpecFromRole(m_lyrics.synced ? ColorRole::OnSurfaceVariant : ColorRole::OnSurface),
           .maxWidth = lineWidth,
           .textAlign = TextAlign::Center,
       });
@@ -1838,11 +1806,445 @@ namespace okaru::music {
       }
       line->setPosition(std::round((lineWidth - line->width()) * 0.5F), y);
       m_lyricTops.push_back(y);
-      y += line->height() + gap;
+      y += line->height() + gap * (m_lyrics.synced ? 3.0F : 1.0F);
+      m_lyricLabelOf.push_back(static_cast<int>(m_lyricLines.size()));
       m_lyricLines.push_back(block->addChild(std::move(line)));
     }
-    block->setSize(lineWidth, y + Style::spaceLg * scale);
+    block->setSize(lineWidth, y + (m_lyrics.synced ? 160.0F * scale : Style::spaceLg * scale));
     scroll->content()->addChild(std::move(block));
+    return scroll;
+  }
+
+  // ── Letra ─────────────────────────────────────────────────────────────────────────────────────────
+
+  void MusicWindow::resolveLyrics() {
+    m_lyricsItem = m_player.currentItem();
+    m_lyrics = {};
+    const Track* track = currentTrack();
+    if (track == nullptr) {
+      return;
+    }
+    const auto& settings = m_state.settings;
+    const fs::path cache = lyricsCachePath(*track);
+    bool needOnline = false;
+    for (Source source : settings.lyrics.order) {
+      if (!settings.lyrics.on(source)) {
+        continue;
+      }
+      Lyrics found;
+      if (source == Source::Embedded) {
+        found = parseLyrics(track->lyrics);
+      } else if (source == Source::Local) {
+        found = parseLyrics(sidecarLyrics(track->path));
+      } else if (std::ifstream in(cache, std::ios::binary); in) {
+        found = parseLyrics(std::string(std::istreambuf_iterator<char>(in), {}));
+      } else if (!OnlineService::knownMissing(cache) && (m_lyrics.empty() || (settings.preferSynced && !m_lyrics.synced))) {
+        needOnline = true;
+      }
+      if (found.empty()) {
+        continue;
+      }
+      if (m_lyrics.empty() || (settings.preferSynced && found.synced && !m_lyrics.synced)) {
+        m_lyrics = std::move(found);
+      }
+      if (m_lyrics.synced || !settings.preferSynced) {
+        break;
+      }
+    }
+    if (needOnline && !m_lyricsFetching.contains(cache.string())) {
+      m_lyricsFetching.insert(cache.string());
+      const std::string item = m_lyricsItem;
+      m_online.fetchLyrics(*track, cache, [this, item, key = cache.string()](std::string /*text*/) {
+        m_lyricsFetching.erase(key);
+        // Si sigue sonando esa canción, se vuelve a elegir con la descargada ya en caché.
+        if (m_player.currentItem() == item) {
+          resolveLyrics();
+          if (m_fullPlayer && m_playerTab == PlayerTab::Lyrics) {
+            m_animateLyrics = true;
+            m_app.requestRebuild();
+          }
+        }
+      });
+    }
+  }
+
+  void MusicWindow::updateLyricsHighlight() {
+    if (!m_lyrics.synced || m_lyricLines.empty() || m_lyricLabelOf.size() != m_lyrics.lines.size()) {
+      return;
+    }
+    const long line = currentLine(m_lyrics, m_player.state().position);
+    if (line == m_lyricIndex) {
+      return;
+    }
+    const auto labelAt = [&](long index) -> Label* {
+      if (index < 0 || static_cast<std::size_t>(index) >= m_lyricLabelOf.size()) {
+        return nullptr;
+      }
+      const int label = m_lyricLabelOf[static_cast<std::size_t>(index)];
+      return label < 0 ? nullptr : static_cast<Label*>(m_lyricLines[static_cast<std::size_t>(label)]);
+    };
+    if (Label* old = labelAt(m_lyricIndex); old != nullptr) {
+      old->setColor(colorSpecFromRole(ColorRole::OnSurfaceVariant));
+      old->setScale(1.0F);
+    }
+    m_lyricIndex = line;
+    Label* now = labelAt(line);
+    if (now == nullptr) {
+      m_app.invalidate();
+      return;
+    }
+    now->setColor(colorSpecFromRole(ColorRole::Primary));
+    now->setScale(1.06F);
+    // Desliza la letra para que la línea que suena quede al centro.
+    if (m_lyricsView != nullptr) {
+      const float target = std::max(0.0F, now->y() + now->height() * 0.5F - m_lyricsView->height() * 0.5F);
+      const float from = m_lyricsScroll.offset;
+      if (AnimationManager* anim = m_lyricsView->animationManager(); anim != nullptr) {
+        anim->cancelForOwner(&m_lyricsScroll);
+        anim->animate(
+            0.0F, 1.0F, 420.0F, Easing::EaseOutCubic,
+            [this, from, target](float t) {
+              if (m_lyricsView != nullptr) {
+                m_lyricsView->setScrollOffset(from + (target - from) * t);
+                m_app.requestFrame();
+              }
+            },
+            {}, &m_lyricsScroll
+        );
+      } else {
+        m_lyricsView->setScrollOffset(target);
+      }
+    }
+    m_app.invalidate();
+  }
+
+  // ── Ajustes ───────────────────────────────────────────────────────────────────────────────────────
+
+  void MusicWindow::applySettings() {
+    const auto& settings = m_state.settings;
+    m_player.setCrossfade(settings.crossfade);
+    m_player.setGapless(settings.gapless);
+    m_player.setReplayGain(static_cast<int>(settings.replayGain));
+  }
+
+  void MusicWindow::fetchMissingCovers() {
+    if (!m_state.settings.covers.on(Source::Online)) {
+      return;
+    }
+    // Una petición por álbum sin carátula (o por canción suelta, sin álbum); lo ya buscado sin éxito no se repite.
+    for (const Album& album : m_model.albums) {
+      if (!album.cover.empty() || album.tracks.empty()) {
+        continue;
+      }
+      const auto groups = album.title.empty() ? album.tracks : std::vector<std::size_t>{album.tracks.front()};
+      for (std::size_t index : groups) {
+        const Track& track = m_model.tracks[index];
+        const fs::path target = coverPathFor(track, m_library.coversDir());
+        std::error_code ec;
+        if (m_coversFetching.contains(target.string()) || OnlineService::knownMissing(target) || fs::exists(target, ec)) {
+          continue;
+        }
+        m_coversFetching.insert(target.string());
+        // Las canciones que comparten esa carátula: el álbum entero, o solo esa.
+        std::vector<std::string> paths;
+        for (std::size_t t : album.title.empty() ? std::vector<std::size_t>{index} : album.tracks) {
+          paths.push_back(m_model.tracks[t].path);
+        }
+        m_online.fetchCover(track, target, [this, target, paths = std::move(paths)](bool ok) {
+          m_coversFetching.erase(target.string());
+          if (!ok) {
+            return;
+          }
+          m_library.setCover(paths, target.string());
+          for (const auto& path : paths) {
+            if (const auto it = m_byPath.find(path); it != m_byPath.end()) {
+              m_model.tracks[it->second].cover = target.string();
+            }
+          }
+          for (Album& a : m_model.albums) {
+            if (a.cover.empty() && !a.tracks.empty() && m_model.tracks[a.tracks.front()].cover == target.string()) {
+              a.cover = target.string();
+            }
+          }
+          for (Artist& artist : m_model.artists) {
+            for (std::size_t a : artist.albums) {
+              if (artist.cover.empty() && !m_model.albums[a].cover.empty()) {
+                artist.cover = m_model.albums[a].cover;
+              }
+            }
+          }
+          // Varias pueden llegar seguidas: una sola reconstrucción. Con el reproductor abierto no se toca la vista.
+          m_coverRebuild.start(std::chrono::milliseconds(1500), [this] {
+            if (!m_fullPlayer) {
+              m_app.requestRebuild();
+            }
+          });
+        });
+      }
+    }
+  }
+
+  std::unique_ptr<Node> MusicWindow::buildSourceList(SourceOrder& sources, bool lyrics, float width, float scale) {
+    auto list = ui::column({.align = FlexAlign::Stretch, .gap = Style::spaceXs * scale, .width = width});
+    // Las carátulas de internet no se ordenan: siempre son el último recurso (solo para las que faltan).
+    std::vector<std::size_t> positions;
+    for (std::size_t i = 0; i < kSourceCount; ++i) {
+      if (lyrics || sources.order[i] != Source::Online) {
+        positions.push_back(i);
+      }
+    }
+    for (std::size_t p = 0; p < positions.size(); ++p) {
+      const std::size_t position = positions[p];
+      const Source source = sources.order[position];
+      const auto index = static_cast<std::size_t>(source);
+      const char* names[] = {"embedded", "local", "online"};
+      const std::string base = std::format("apps.music.settings.{}.{}", lyrics ? "lyrics" : "covers", names[index]);
+      auto row = ui::row({
+          .align = FlexAlign::Center,
+          .gap = Style::spaceSm * scale,
+          .paddingV = Style::spaceXs * scale,
+          .paddingH = Style::spaceSm * scale,
+          .fill = colorSpecFromRole(ColorRole::SurfaceContainerHigh),
+          .width = width,
+      });
+      row->addChild(
+          ui::label({
+              .text = std::to_string(p + 1),
+              .fontSize = Style::fontSizeCaption * scale,
+              .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+              .minWidth = 18.0F * scale,
+          })
+      );
+      auto text = ui::column({.align = FlexAlign::Start, .gap = 2.0F * scale, .flexGrow = 1.0F});
+      text->addChild(ui::label({.text = tr(base + ".name"), .fontSize = Style::fontSizeBody * scale, .fontWeight = FontWeight::SemiBold}));
+      text->addChild(
+          ui::label({
+              .text = tr(base + ".hint"),
+              .fontSize = Style::fontSizeCaption * scale,
+              .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+              .maxWidth = width - 200.0F * scale,
+          })
+      );
+      row->addChild(std::move(text));
+      const auto move = [this, &sources, position, positions, p](int delta) {
+        const auto target = static_cast<long>(p) + delta;
+        if (target >= 0 && target < static_cast<long>(positions.size())) {
+          std::swap(sources.order[position], sources.order[positions[static_cast<std::size_t>(target)]]);
+          saveState();
+          m_lyricsItem.clear();
+          m_app.requestRebuild();
+        }
+      };
+      row->addChild(ui::button({
+          .glyph = "arrow-up",
+          .enabled = p > 0,
+          .variant = ButtonVariant::Ghost,
+          .tooltip = tr("apps.music.settings.move-up"),
+          .onClick = [move] { move(-1); },
+      }));
+      row->addChild(ui::button({
+          .glyph = "arrow-down",
+          .enabled = p + 1 < positions.size(),
+          .variant = ButtonVariant::Ghost,
+          .tooltip = tr("apps.music.settings.move-down"),
+          .onClick = [move] { move(1); },
+      }));
+      row->addChild(ui::toggle({
+          .checked = sources.enabled[index],
+          .onChange =
+              [this, &sources, index](bool on) {
+                sources.enabled[index] = on;
+                saveState();
+                m_lyricsItem.clear();
+                m_app.requestRebuild();
+              },
+      }));
+      list->addChild(std::move(row));
+    }
+    return list;
+  }
+
+  std::unique_ptr<Node> MusicWindow::buildSettings(float width, float height, float scale) {
+    auto& settings = m_state.settings;
+    const float pad = Style::spaceLg * scale;
+    const float inner = std::min(760.0F * scale, std::max(0.0F, width - pad * 2.0F - 16.0F * scale));
+    auto page = ui::column({.align = FlexAlign::Stretch, .gap = Style::spaceMd * scale, .padding = pad, .width = inner + pad * 2.0F});
+
+    const auto section = [&](const char* glyph, const char* key) {
+      auto row = ui::row({.align = FlexAlign::Center, .gap = Style::spaceSm * scale, .paddingV = Style::spaceSm * scale});
+      row->addChild(ui::glyph({.glyph = glyph, .glyphSize = 18.0F * scale, .color = colorSpecFromRole(ColorRole::Primary)}));
+      row->addChild(ui::label({.text = tr(key), .fontSize = Style::fontSizeTitle * scale, .fontWeight = FontWeight::SemiBold}));
+      return row;
+    };
+    // Fila de ajuste: título y explicación a la izquierda, el control a la derecha.
+    const auto setting = [&](const std::string& key, std::unique_ptr<Node> control) {
+      auto row = ui::row({.align = FlexAlign::Center, .gap = Style::spaceMd * scale, .width = inner});
+      auto text = ui::column({.align = FlexAlign::Start, .gap = 2.0F * scale, .flexGrow = 1.0F});
+      text->addChild(ui::label({.text = tr(key + ".name"), .fontSize = Style::fontSizeBody * scale}));
+      text->addChild(
+          ui::label({
+              .text = tr(key + ".hint"),
+              .fontSize = Style::fontSizeCaption * scale,
+              .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+              .maxWidth = inner - 260.0F * scale,
+          })
+      );
+      row->addChild(std::move(text));
+      row->addChild(std::move(control));
+      return row;
+    };
+    const auto toggle = [&](bool& value, std::function<void()> after = {}) {
+      return ui::toggle({
+          .checked = value,
+          .onChange =
+              [this, &value, after](bool on) {
+                value = on;
+                if (after) {
+                  after();
+                }
+                saveState();
+              },
+      });
+    };
+
+    page->addChild(ui::label({.text = tr("apps.music.settings.title"), .fontSize = Style::fontSizeHeader * scale, .fontWeight = FontWeight::SemiBold}));
+
+    // Biblioteca.
+    page->addChild(section("folder", "apps.music.settings.section.library"));
+    for (std::size_t i = 0; i < m_state.folders.size(); ++i) {
+      const fs::path& folder = m_state.folders[i];
+      auto row = ui::row({
+          .align = FlexAlign::Center,
+          .gap = Style::spaceSm * scale,
+          .paddingV = Style::spaceXs * scale,
+          .paddingH = Style::spaceSm * scale,
+          .fill = colorSpecFromRole(ColorRole::SurfaceContainerHigh),
+          .width = inner,
+      });
+      row->addChild(ui::glyph({.glyph = "folder", .glyphSize = 16.0F * scale, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant)}));
+      row->addChild(ui::label({.text = folder.string(), .fontSize = Style::fontSizeBody * scale, .maxLines = 1, .ellipsize = TextEllipsize::Middle, .flexGrow = 1.0F}));
+      row->addChild(ui::button({
+          .glyph = "x",
+          .variant = ButtonVariant::Ghost,
+          .tooltip = tr("apps.music.remove-folder", "folder", folder.string()),
+          .onClick = [this, i] { removeFolder(i); },
+      }));
+      page->addChild(std::move(row));
+    }
+    auto folderButtons = ui::row({.align = FlexAlign::Center, .gap = Style::spaceSm * scale});
+    folderButtons->addChild(ui::button({.text = tr("apps.music.add-folder"), .glyph = "folder-plus", .variant = ButtonVariant::Outline, .onClick = [this] { addFolder(); }}));
+    folderButtons->addChild(ui::button({
+        .text = tr("apps.music.rescan"),
+        .glyph = "refresh",
+        .enabled = !m_library.scanning(),
+        .variant = ButtonVariant::Ghost,
+        .onClick = [this] { rescan(); },
+    }));
+    page->addChild(std::move(folderButtons));
+    page->addChild(setting("apps.music.settings.scan-on-start", toggle(settings.scanOnStart)));
+    page->addChild(setting(
+        "apps.music.settings.rebuild",
+        ui::button({
+            .text = tr("apps.music.settings.rebuild.action"),
+            .glyph = "database-off",
+            .enabled = !m_library.scanning(),
+            .variant = ButtonVariant::Destructive,
+            .onClick =
+                [this] {
+                  m_library.reset();
+                  setModel({});
+                  rescan();
+                },
+        })
+    ));
+
+    // Reproducción.
+    page->addChild(section("player-play", "apps.music.settings.section.playback"));
+    auto fade = ui::row({.align = FlexAlign::Center, .gap = Style::spaceSm * scale});
+    fade->addChild(ui::slider({
+        .minValue = 0.0,
+        .maxValue = 12.0,
+        .step = 1.0,
+        .value = static_cast<double>(settings.crossfade),
+        .width = 160.0F * scale,
+        .onValueChanged =
+            [this](double value) {
+              m_state.settings.crossfade = static_cast<int>(std::lround(value));
+              m_player.setCrossfade(m_state.settings.crossfade);
+              if (m_crossfadeLabel != nullptr) {
+                m_crossfadeLabel->setText(
+                    m_state.settings.crossfade == 0 ? tr("apps.music.settings.crossfade.off")
+                                                    : tr("apps.music.settings.crossfade.seconds", "seconds", m_state.settings.crossfade)
+                );
+                m_app.invalidate();
+              }
+            },
+        .onDragEnd = [this] { saveState(); },
+    }));
+    fade->addChild(ui::label({
+        .out = &m_crossfadeLabel,
+        .text = settings.crossfade == 0 ? tr("apps.music.settings.crossfade.off")
+                                        : tr("apps.music.settings.crossfade.seconds", "seconds", settings.crossfade),
+        .fontSize = Style::fontSizeCaption * scale,
+        .minWidth = 80.0F * scale,
+    }));
+    page->addChild(setting("apps.music.settings.crossfade", std::move(fade)));
+    page->addChild(setting("apps.music.settings.gapless", toggle(settings.gapless, [this] { applySettings(); })));
+    page->addChild(setting(
+        "apps.music.settings.replaygain",
+        ui::select({
+            .options = std::vector<std::string>{tr("apps.music.settings.replaygain.off"), tr("apps.music.settings.replaygain.track"),
+                                                tr("apps.music.settings.replaygain.album")},
+            .selectedIndex = static_cast<std::size_t>(settings.replayGain),
+            .width = 170.0F * scale,
+            .onSelectionChanged =
+                [this](std::size_t index, std::string_view) {
+                  m_state.settings.replayGain = static_cast<ReplayGain>(index);
+                  applySettings();
+                  saveState();
+                },
+        })
+    ));
+    page->addChild(setting("apps.music.settings.resume", toggle(settings.resume)));
+
+    // Letras.
+    page->addChild(section("microphone-2", "apps.music.settings.section.lyrics"));
+    page->addChild(ui::label({
+        .text = tr("apps.music.settings.lyrics.hint"),
+        .fontSize = Style::fontSizeCaption * scale,
+        .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+        .maxWidth = inner,
+    }));
+    page->addChild(buildSourceList(settings.lyrics, true, inner, scale));
+    page->addChild(setting("apps.music.settings.prefer-synced", toggle(settings.preferSynced, [this] { m_lyricsItem.clear(); })));
+
+    // Carátulas.
+    page->addChild(section("photo", "apps.music.settings.section.covers"));
+    page->addChild(ui::label({
+        .text = tr("apps.music.settings.covers.hint"),
+        .fontSize = Style::fontSizeCaption * scale,
+        .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+        .maxWidth = inner,
+    }));
+    page->addChild(buildSourceList(settings.covers, false, inner, scale));
+    page->addChild(setting(
+        "apps.music.settings.covers.download",
+        toggle(settings.covers.enabled[static_cast<std::size_t>(Source::Online)], [this] { fetchMissingCovers(); })
+    ));
+    page->addChild(ui::label({
+        .text = tr("apps.music.settings.privacy"),
+        .fontSize = Style::fontSizeCaption * scale,
+        .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+        .maxWidth = inner,
+    }));
+
+    auto scroll = ui::scrollView({
+        .state = &m_scroll[scrollKey(View::Settings, 0, 0, false)],
+        .contentScale = scale,
+        .width = width,
+        .height = height,
+    });
+    scroll->content()->addChild(std::move(page));
     return scroll;
   }
 
@@ -1858,6 +2260,12 @@ namespace okaru::music {
     case XKB_KEY_w:
       if (ctrl) {
         m_app.quit();
+        return true;
+      }
+      return false;
+    case XKB_KEY_comma:
+      if (ctrl) {
+        show(View::Settings);
         return true;
       }
       return false;

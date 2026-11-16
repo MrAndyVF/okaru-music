@@ -1,6 +1,8 @@
 // Pruebas de la biblioteca de Valandy: agrupación por artista/álbum, búsqueda y escaneo real a SQLite.
 #include "apps/music/audio_player.h"
 #include "apps/music/library.h"
+#include "apps/music/lyrics.h"
+#include "apps/music/music_state.h"
 #include "core/deferred_call.h"
 
 #include <cassert>
@@ -146,6 +148,42 @@ namespace {
     assert(model.artists[artists[0]].name == "A");
   }
 
+  void testLyrics() {
+    const Lyrics synced = parseLyrics("[ar:Someone]\n[00:12.50]Hola\n[00:05.00][00:20]Coro\n\n[00:30.10] Fin\r\n");
+    assert(synced.synced);
+    assert(synced.lines.size() == 4); // la etiqueta [ar:] fuera; "Coro" dos veces
+    assert(synced.lines[0].text == "Coro" && synced.lines[0].time == 5.0);
+    assert(synced.lines[1].text == "Hola" && synced.lines[1].time == 12.5);
+    assert(synced.lines[3].text == "Fin");
+    assert(currentLine(synced, 1.0) == -1);
+    assert(currentLine(synced, 12.5) == 1);
+    assert(currentLine(synced, 99.0) == 3);
+    const Lyrics plain = parseLyrics("\nUno\n\nDos\n\n");
+    assert(!plain.synced && plain.lines.size() == 3 && plain.lines[0].text == "Uno" && plain.lines[1].text.empty());
+    assert(currentLine(plain, 10.0) == -1);
+    assert(parseLyrics("").empty());
+  }
+
+  void testSettings() {
+    const fs::path path = fs::temp_directory_path() / ("okaru-music-state-" + std::to_string(::getpid()) + ".toml");
+    MusicState state;
+    state.folders = {"/m"};
+    state.settings.crossfade = 6;
+    state.settings.replayGain = ReplayGain::Album;
+    state.settings.lyrics.move(2, -1); // internet antes que el .lrc
+    state.settings.covers.enabled[static_cast<std::size_t>(Source::Online)] = false;
+    assert(saveState(state, path));
+    const MusicState loaded = loadState(path);
+    assert(loaded.settings.crossfade == 6);
+    assert(loaded.settings.replayGain == ReplayGain::Album);
+    assert(loaded.settings.lyrics.order[1] == Source::Online && loaded.settings.lyrics.order[2] == Source::Local);
+    assert(!loaded.settings.covers.on(Source::Online) && loaded.settings.covers.on(Source::Embedded));
+    // Un orden inválido (repetido) se ignora y queda el de fábrica.
+    std::ofstream(path) << "[settings.lyrics]\norder = [0, 0, 1]\n";
+    assert(loadState(path).settings.lyrics.order[2] == Source::Online);
+    fs::remove(path);
+  }
+
   void testShuffle() {
     const std::vector<std::string> items{"a", "b", "c", "d", "e"};
     const auto out = shuffledWithFirst(items, 3);
@@ -170,7 +208,7 @@ namespace {
     const auto runScan = [&](std::vector<fs::path> folders) {
       bool done = false;
       Model result;
-      library.scan(std::move(folders), [](Library::Progress) {}, [&](Model model) {
+      library.scan(std::move(folders), {}, [](Library::Progress) {}, [&](Model model) {
         result = std::move(model);
         done = true;
       });
@@ -207,6 +245,8 @@ int main() {
   testOrganize();
   testSearch();
   testSort();
+  testLyrics();
+  testSettings();
   testShuffle();
   testScan();
   return 0;

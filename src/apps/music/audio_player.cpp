@@ -94,6 +94,7 @@ namespace okaru::music {
 
   AudioPlayer::~AudioPlayer() {
     *m_alive = false;
+    finishCrossfade();
     if (m_mpv != nullptr) {
       mpv_set_wakeup_callback(m_mpv, nullptr, nullptr);
       mpv_terminate_destroy(m_mpv);
@@ -149,6 +150,7 @@ namespace okaru::music {
   }
 
   void AudioPlayer::playIndex(std::size_t index) {
+    finishCrossfade();
     if (index < m_state.queue.size()) {
       command({"playlist-play-index", std::to_string(index)});
       setPaused(false);
@@ -191,6 +193,7 @@ namespace okaru::music {
   }
 
   void AudioPlayer::next() {
+    finishCrossfade();
     if (m_repeat == Repeat::One) {
       // Con «repetir una», el botón igual pasa a la siguiente (loop-file solo afecta al final natural).
       command({"playlist-next", "force"});
@@ -200,6 +203,7 @@ namespace okaru::music {
   }
 
   void AudioPlayer::previous() {
+    finishCrossfade();
     if (m_state.position > kRestartThreshold || m_state.current <= 0) {
       seekTo(0.0);
       return;
@@ -211,6 +215,7 @@ namespace okaru::music {
     if (m_mpv == nullptr) {
       return;
     }
+    finishCrossfade(); // pausar a mitad del fundido corta la canción que se va
     // Terminada la cola, «reproducir» la empieza de nuevo.
     if (!paused && m_state.idle && !m_state.queue.empty()) {
       command({"playlist-play-index", "0"});
@@ -220,10 +225,14 @@ namespace okaru::music {
   }
 
   void AudioPlayer::seekTo(double seconds) {
+    finishCrossfade();
     command({"seek", std::format("{:.3f}", std::max(0.0, seconds)), "absolute+exact"});
   }
 
-  void AudioPlayer::seekBy(double seconds) { command({"seek", std::format("{:.3f}", seconds), "relative+exact"}); }
+  void AudioPlayer::seekBy(double seconds) {
+    finishCrossfade();
+    command({"seek", std::format("{:.3f}", seconds), "relative+exact"});
+  }
 
   void AudioPlayer::setVolume(double volume) {
     if (m_mpv != nullptr) {
@@ -315,8 +324,103 @@ namespace okaru::music {
         break;
       }
     }
+    if (changed) {
+      maybeStartCrossfade();
+    }
     if (changed && m_onChange) {
       m_onChange(structural);
+    }
+  }
+
+  void AudioPlayer::setCrossfade(int seconds) {
+    m_crossfade = std::clamp(seconds, 0, 12);
+    if (m_crossfade == 0) {
+      finishCrossfade();
+    }
+  }
+
+  void AudioPlayer::setGapless(bool gapless) {
+    if (m_mpv != nullptr) {
+      mpv_set_property_string(m_mpv, "gapless-audio", gapless ? "weak" : "no");
+    }
+  }
+
+  void AudioPlayer::setReplayGain(int mode) {
+    if (m_mpv != nullptr) {
+      mpv_set_property_string(m_mpv, "replaygain", mode == 1 ? "track" : mode == 2 ? "album" : "no");
+    }
+  }
+
+  void AudioPlayer::maybeStartCrossfade() {
+    const auto& s = m_state;
+    const auto fade = static_cast<double>(m_crossfade);
+    const bool hasNext = s.current >= 0
+        && (static_cast<std::size_t>(s.current) + 1 < s.queue.size() || (m_repeat == Repeat::All && s.queue.size() > 1));
+    // Solo al final natural de una canción que dura bastante más que el fundido.
+    if (m_crossfade == 0 || m_tail != nullptr || s.paused || s.idle || m_repeat == Repeat::One || !hasNext
+        || s.duration < fade * 3.0 || s.duration - s.position > fade || s.position <= 0.0) {
+      return;
+    }
+    m_tail = mpv_create();
+    if (m_tail == nullptr) {
+      return;
+    }
+    const std::string volume = std::format("{:.1f}", s.volume);
+    const std::string start = std::format("{:.3f}", s.position);
+    for (const auto& [name, value] : std::array<std::pair<const char*, std::string>, 8>{{
+             {"vo", "null"},
+             {"video", "no"},
+             {"audio-display", "no"},
+             {"terminal", "no"},
+             {"ytdl", "no"},
+             {"volume", volume},
+             {"mute", s.muted ? "yes" : "no"},
+             {"start", start},
+         }}) {
+      mpv_set_option_string(m_tail, name, value.c_str());
+    }
+    if (mpv_initialize(m_tail) < 0) {
+      mpv_terminate_destroy(m_tail);
+      m_tail = nullptr;
+      return;
+    }
+    const std::string item = currentItem();
+    const char* load[] = {"loadfile", item.c_str(), nullptr};
+    mpv_command_async(m_tail, 0, load);
+    // La principal pasa ya a la siguiente, en silencio, y sube con el fundido.
+    double silent = -60.0;
+    mpv_set_property(m_mpv, "volume-gain", MPV_FORMAT_DOUBLE, &silent);
+    command({"playlist-next"});
+    m_fadeStart = std::chrono::steady_clock::now();
+    m_fadeTimer.startRepeating(std::chrono::milliseconds(30), [this] { stepCrossfade(); });
+  }
+
+  void AudioPlayer::stepCrossfade() {
+    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - m_fadeStart).count();
+    const double p = std::clamp(elapsed / std::max(1, m_crossfade), 0.0, 1.0);
+    if (p >= 1.0) {
+      finishCrossfade();
+      return;
+    }
+    // Igual potencia (seno/coseno): el volumen total no se hunde a mitad del fundido.
+    const auto toDb = [](double amplitude) { return std::max(-60.0, 20.0 * std::log10(std::max(amplitude, 1e-3))); };
+    double in = toDb(std::sin(p * M_PI / 2.0));
+    double out = toDb(std::cos(p * M_PI / 2.0));
+    mpv_set_property_async(m_mpv, 0, "volume-gain", MPV_FORMAT_DOUBLE, &in);
+    if (m_tail != nullptr) {
+      mpv_set_property_async(m_tail, 0, "volume-gain", MPV_FORMAT_DOUBLE, &out);
+    }
+  }
+
+  void AudioPlayer::finishCrossfade() {
+    m_fadeTimer.stop();
+    if (m_tail != nullptr) {
+      mpv_terminate_destroy(m_tail);
+      m_tail = nullptr;
+    }
+    if (m_mpv != nullptr) {
+      double gain = 0.0;
+      mpv_set_property_async(m_mpv, 0, "volume-gain", MPV_FORMAT_DOUBLE, &gain);
     }
   }
 

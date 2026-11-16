@@ -8,8 +8,10 @@
 
 #include "apps/music/audio_player.h"
 #include "apps/music/library.h"
+#include "apps/music/lyrics.h"
 #include "apps/music/mpris_server.h"
 #include "apps/music/music_state.h"
+#include "apps/music/online.h"
 #include "ui/controls/scroll_view.h"
 
 #include <cstdint>
@@ -17,10 +19,12 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class AnimationManager;
 class Button;
+class ScrollView;
 class Input;
 class Label;
 class Node;
@@ -40,7 +44,7 @@ namespace okaru::music {
   class AlbumGridAdapter;
   class NameListAdapter;
 
-  enum class View : std::uint8_t { Albums, Artists, Songs, Genres };
+  enum class View : std::uint8_t { Albums, Artists, Songs, Genres, Settings };
   // Pestañas del reproductor a pantalla completa.
   enum class PlayerTab : std::uint8_t { Queue, Lyrics };
 
@@ -64,6 +68,17 @@ namespace okaru::music {
     [[nodiscard]] std::unique_ptr<Node> buildFullPlayer(float width, float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildQueuePanel(float width, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildLyricsPanel(float width, float scale);
+    [[nodiscard]] std::unique_ptr<Node> buildSettings(float width, float height, float scale);
+    // Fuentes de letra o carátula en orden, con interruptor y flechas para subir/bajar.
+    [[nodiscard]] std::unique_ptr<Node> buildSourceList(SourceOrder& sources, bool lyrics, float width, float scale);
+
+    // Ajustes: los aplica al reproductor y los guarda.
+    void applySettings();
+    // Letra de la canción actual según el orden de fuentes; si toca internet, la pide y vuelve a resolver al llegar.
+    void resolveLyrics();
+    void updateLyricsHighlight();
+    // Carátulas que faltan, de internet (si está activo), una a una.
+    void fetchMissingCovers();
     [[nodiscard]] std::unique_ptr<Node> buildEmpty(float width, float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildTracks(std::vector<std::size_t> tracks, bool numbers, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildAlbums(std::vector<std::size_t> albums, float scale);
@@ -99,6 +114,7 @@ namespace okaru::music {
 
     apps::OkaruApp& m_app;
     Library m_library;
+    OnlineService m_online;
     Model m_model;
     MusicState m_state;
     AudioPlayer m_player;
@@ -159,6 +175,18 @@ namespace okaru::music {
     Label* m_durationLabel = nullptr;
     bool m_syncingTimeline = false; // Slider::setValue avisa como si lo moviera el usuario
     std::string m_shownItem;        // canción que muestra la barra de abajo
+
+    // Letra de la canción actual.
+    Lyrics m_lyrics;
+    std::string m_lyricsItem;
+    std::unordered_set<std::string> m_lyricsFetching;
+    ScrollView* m_lyricsView = nullptr;
+    std::vector<int> m_lyricLabelOf; // índice de etiqueta por línea de la letra (-1: estrofa vacía)
+    long m_lyricIndex = -1;
+    // Carátulas en camino (para no pedir dos veces) y reconstrucción diferida al llegar varias.
+    std::unordered_set<std::string> m_coversFetching;
+    Timer m_coverRebuild;
+    Label* m_crossfadeLabel = nullptr;
 
     std::unique_ptr<MprisServer> m_mpris; // último: se va antes que m_player
   };

@@ -4,6 +4,8 @@
 // solo se leen los archivos nuevos o modificados y se borran los que ya no están. Las vistas (artistas, álbumes,
 // géneros, búsqueda) se arman en memoria desde esas filas: con decenas de miles de canciones siguen siendo pocos MB.
 
+#include "apps/music/music_state.h"
+
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
@@ -103,12 +105,20 @@ namespace okaru::music {
     // Lo que ya está en la base, sin tocar el disco (al abrir, antes de escanear).
     [[nodiscard]] Model load();
     // Escanea en otro hilo. `progress` y `done` llegan al hilo principal. Un escaneo en curso se cancela.
-    void scan(std::vector<std::filesystem::path> folders, ProgressFn progress, DoneFn done);
+    void scan(std::vector<std::filesystem::path> folders, SourceOrder covers, ProgressFn progress, DoneFn done);
+    // Borra la base y las carátulas guardadas (el próximo escaneo lee todo de nuevo).
+    void reset();
+    // Carátula descargada para esas canciones (hilo principal; es una escritura corta).
+    void setCover(const std::vector<std::string>& paths, const std::string& cover);
+    [[nodiscard]] const std::filesystem::path& coversDir() const noexcept { return m_coversDir; }
     [[nodiscard]] bool scanning() const noexcept { return m_scanning; }
 
   private:
     void cancel();
-    void runScan(const std::vector<std::filesystem::path>& folders, const ProgressFn& progress, const DoneFn& done);
+    void runScan(
+        const std::vector<std::filesystem::path>& folders, const SourceOrder& covers, const ProgressFn& progress,
+        const DoneFn& done
+    );
 
     std::filesystem::path m_dbPath;
     std::filesystem::path m_coversDir;
@@ -118,8 +128,14 @@ namespace okaru::music {
     std::shared_ptr<std::atomic<bool>> m_alive = std::make_shared<std::atomic<bool>>(true);
   };
 
-  // Lee etiquetas, duración, letra y carátula de un archivo (TagLib). La carátula se guarda en `coversDir`,
-  // una por álbum, reducida a 512 px; si el archivo no la trae se busca cover/folder/front.* en su carpeta.
-  [[nodiscard]] Track readTrack(const std::filesystem::path& path, const std::filesystem::path& coversDir);
+  // Lee etiquetas, duración, letra y carátula de un archivo (TagLib). La carátula se guarda en `coversDir`, una por
+  // álbum, reducida a 512 px, de la primera fuente activa en el orden de `sources`: la incrustada o
+  // cover/folder/front.* de su carpeta (la de internet la busca la ventana).
+  [[nodiscard]] Track
+  readTrack(const std::filesystem::path& path, const std::filesystem::path& coversDir, const SourceOrder& sources = {});
+  // Dónde va la carátula de esa canción (una por álbum; sin álbum, una por archivo).
+  [[nodiscard]] std::filesystem::path coverPathFor(const Track& track, const std::filesystem::path& coversDir);
+  // Reduce `sourceImage` a 512 px (recorte cuadrado) y la guarda como JPEG en `target`.
+  bool storeCover(const std::string& sourceImage, const std::filesystem::path& target);
 
 } // namespace okaru::music

@@ -4,7 +4,10 @@
 // siguiente canción y las une sin silencio (gapless), y repetir/aleatorio no necesitan lógica propia. La app solo
 // le da órdenes y lee su estado (posición, lista, canción actual). Todo se usa desde el hilo principal.
 
+#include "core/timer_manager.h"
+
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -66,8 +69,18 @@ namespace okaru::music {
     void setMuted(bool muted);
     void setShuffle(bool shuffle);
     void setRepeat(Repeat repeat);
+    // Segundos de fundido entre canciones (0 = sin fundido).
+    void setCrossfade(int seconds);
+    void setGapless(bool gapless);
+    // 0 sin normalizar, 1 por pista, 2 por álbum (ReplayGain de las etiquetas).
+    void setReplayGain(int mode);
 
   private:
+    // Fundido: otro mpv («cola») sigue tocando el final de la canción que se va, bajando, mientras la principal ya
+    // pasó a la siguiente y sube. Así la cola de reproducción sigue siendo una sola (la de la principal).
+    void maybeStartCrossfade();
+    void stepCrossfade();
+    void finishCrossfade();
     void drainEvents();
     void onProperty(const char* name, int format, void* data);
     void command(const std::vector<std::string>& args);
@@ -80,6 +93,10 @@ namespace okaru::music {
     bool m_shuffled = false;
     Repeat m_repeat = Repeat::Off;
     std::vector<std::string> m_original; // la cola sin mezclar, para volver a ella
+    int m_crossfade = 0;
+    mpv_handle* m_tail = nullptr;
+    Timer m_fadeTimer;
+    std::chrono::steady_clock::time_point m_fadeStart;
     std::shared_ptr<std::atomic<bool>> m_alive = std::make_shared<std::atomic<bool>>(true);
     std::atomic<bool> m_eventsPending{false};
   };

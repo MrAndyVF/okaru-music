@@ -117,27 +117,31 @@ namespace okaru::music {
       return std::format("{:016x}", std::hash<std::string>{}(source));
     }
 
-    bool writeCover(const std::string& sourceImage, const fs::path& target) {
-      auto image = loadImageFile(sourceImage, kCoverSize, true);
-      if (!image) {
-        return false;
-      }
-      const auto jpeg = encodeJpeg(image->rgba.data(), image->width, image->height, 90);
-      if (jpeg.empty()) {
-        return false;
-      }
-      const fs::path tmp = target.string() + ".part";
-      {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        out.write(reinterpret_cast<const char*>(jpeg.data()), static_cast<std::streamsize>(jpeg.size()));
-        if (!out) {
-          return false;
-        }
-      }
-      std::error_code ec;
-      fs::rename(tmp, target, ec);
-      return !ec;
+  } // namespace
+
+  bool storeCover(const std::string& sourceImage, const fs::path& target) {
+    auto image = loadImageFile(sourceImage, kCoverSize, true);
+    if (!image) {
+      return false;
     }
+    const auto jpeg = encodeJpeg(image->rgba.data(), image->width, image->height, 90);
+    if (jpeg.empty()) {
+      return false;
+    }
+    const fs::path tmp = target.string() + ".part";
+    {
+      std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+      out.write(reinterpret_cast<const char*>(jpeg.data()), static_cast<std::streamsize>(jpeg.size()));
+      if (!out) {
+        return false;
+      }
+    }
+    std::error_code ec;
+    fs::rename(tmp, target, ec);
+    return !ec;
+  }
+
+  namespace {
 
     // ── SQLite ──────────────────────────────────────────────────────────────────────────────────────
 
@@ -490,7 +494,7 @@ namespace okaru::music {
 
   // ── Lectura de archivos ───────────────────────────────────────────────────────────────────────────
 
-  Track readTrack(const fs::path& path, const fs::path& coversDir) {
+  Track readTrack(const fs::path& path, const fs::path& coversDir, const SourceOrder& sources) {
     Track track;
     track.path = path.string();
     std::error_code ec;
@@ -522,46 +526,62 @@ namespace okaru::music {
     }
 
     fs::create_directories(coversDir, ec);
-    const fs::path cover = coversDir / (coverKey(track) + ".jpg");
+    const fs::path cover = coverPathFor(track, coversDir);
+    // Ya guardada (de este archivo, de otro del álbum o descargada).
     if (fs::exists(cover, ec)) {
       track.cover = cover.string();
       return track;
     }
-    if (!file.isNull()) {
-      const auto pictures = file.complexProperties("PICTURE");
+    const auto embedded = [&] {
+      if (file.isNull()) {
+        return false;
+      }
       // La portada si está marcada; si no, la primera imagen.
+      const auto pictures = file.complexProperties("PICTURE");
       const TagLib::VariantMap* chosen = nullptr;
       for (const auto& picture : pictures) {
         if (chosen == nullptr || picture.value("pictureType").toString() == "Front Cover") {
           chosen = &picture;
         }
       }
-      if (chosen != nullptr) {
-        const TagLib::ByteVector data = chosen->value("data").toByteVector();
-        const fs::path raw = cover.string() + ".raw";
-        {
-          std::ofstream out(raw, std::ios::binary | std::ios::trunc);
-          out.write(data.data(), static_cast<std::streamsize>(data.size()));
-        }
-        const bool ok = writeCover(raw.string(), cover);
-        fs::remove(raw, ec);
-        if (ok) {
-          track.cover = cover.string();
-          return track;
+      if (chosen == nullptr) {
+        return false;
+      }
+      const TagLib::ByteVector data = chosen->value("data").toByteVector();
+      const fs::path raw = cover.string() + ".raw";
+      {
+        std::ofstream out(raw, std::ios::binary | std::ios::trunc);
+        out.write(data.data(), static_cast<std::streamsize>(data.size()));
+      }
+      const bool ok = storeCover(raw.string(), cover);
+      fs::remove(raw, ec);
+      return ok;
+    };
+    const auto folder = [&] {
+      for (std::string_view name : kFolderCovers) {
+        for (std::string_view ext : kImageExtensions) {
+          const fs::path candidate = path.parent_path() / (std::string(name) + std::string(ext));
+          if (fs::is_regular_file(candidate, ec) && storeCover(candidate.string(), cover)) {
+            return true;
+          }
         }
       }
-    }
-    for (std::string_view name : kFolderCovers) {
-      for (std::string_view ext : kImageExtensions) {
-        const fs::path candidate = path.parent_path() / (std::string(name) + std::string(ext));
-        if (fs::is_regular_file(candidate, ec) && writeCover(candidate.string(), cover)) {
-          track.cover = cover.string();
-          return track;
-        }
+      return false;
+    };
+    // En el orden elegido; la de internet la busca la ventana después del escaneo.
+    for (Source source : sources.order) {
+      if (!sources.on(source) || source == Source::Online) {
+        continue;
+      }
+      if (source == Source::Embedded ? embedded() : folder()) {
+        track.cover = cover.string();
+        break;
       }
     }
     return track;
   }
+
+  fs::path coverPathFor(const Track& track, const fs::path& coversDir) { return coversDir / (coverKey(track) + ".jpg"); }
 
   // ── Library ───────────────────────────────────────────────────────────────────────────────────────
 
@@ -588,15 +608,42 @@ namespace okaru::music {
     return organize(readAll(db.handle));
   }
 
-  void Library::scan(std::vector<fs::path> folders, ProgressFn progress, DoneFn done) {
+  void Library::scan(std::vector<fs::path> folders, SourceOrder covers, ProgressFn progress, DoneFn done) {
     cancel();
     m_scanning = true;
-    m_worker = std::thread([this, folders = std::move(folders), progress = std::move(progress), done = std::move(done)] {
-      runScan(folders, progress, done);
-    });
+    m_worker = std::thread([this, folders = std::move(folders), covers, progress = std::move(progress),
+                            done = std::move(done)] { runScan(folders, covers, progress, done); });
   }
 
-  void Library::runScan(const std::vector<fs::path>& folders, const ProgressFn& progress, const DoneFn& done) {
+  void Library::reset() {
+    // Caché pura: base de etiquetas y carátulas; el próximo escaneo lo vuelve a leer todo.
+    cancel();
+    std::error_code ec;
+    for (const char* suffix : {"", "-wal", "-shm"}) {
+      fs::remove(m_dbPath.string() + suffix, ec);
+    }
+    fs::remove_all(m_coversDir, ec);
+  }
+
+  void Library::setCover(const std::vector<std::string>& paths, const std::string& cover) {
+    Db db;
+    if (!openDb(db, m_dbPath)) {
+      return;
+    }
+    Statement update(db.handle, "UPDATE tracks SET cover = ?1 WHERE path = ?2");
+    db.exec("BEGIN");
+    for (const auto& path : paths) {
+      sqlite3_reset(update.handle);
+      update.bind(1, cover);
+      update.bind(2, path);
+      sqlite3_step(update.handle);
+    }
+    db.exec("COMMIT");
+  }
+
+  void Library::runScan(
+      const std::vector<fs::path>& folders, const SourceOrder& covers, const ProgressFn& progress, const DoneFn& done
+  ) {
     const auto finish = [&](Model model) {
       DeferredCall::callLater([this, alive = m_alive, done, model = std::move(model)]() mutable {
         if (*alive) {
@@ -658,7 +705,7 @@ namespace okaru::music {
         if (const auto found = known.find(path); found != known.end() && found->second == std::pair{mtime, size}) {
           continue;
         }
-        const Track t = readTrack(entry.path(), m_coversDir);
+        const Track t = readTrack(entry.path(), m_coversDir, covers);
         sqlite3_reset(upsert.handle);
         upsert.bind(1, t.path);
         upsert.bind(2, t.title);

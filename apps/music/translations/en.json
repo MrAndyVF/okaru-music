@@ -9,7 +9,6 @@
       "artists": "Artists",
       "songs": "Songs",
       "genres": "Genres",
-      "folders": "Music folders",
       "add-folder": "Add folder…",
       "remove-folder": "Remove {folder} from the library",
       "scanning": "Scanning… {count} file",
@@ -62,7 +61,84 @@
       "lyrics": "Lyrics",
       "no-lyrics": "This song has no lyrics.",
       "show-player": "Show player",
-      "hide-player": "Hide player"
+      "hide-player": "Hide player",
+      "searching-lyrics": "Looking for the lyrics…",
+      "settings": {
+        "title": "Settings",
+        "section": {
+          "library": "Library",
+          "playback": "Playback",
+          "lyrics": "Lyrics",
+          "covers": "Covers"
+        },
+        "scan-on-start": {
+          "name": "Look for changes on start",
+          "hint": "Read new or changed files in your folders every time Valandy opens."
+        },
+        "rebuild": {
+          "name": "Rebuild library",
+          "hint": "Forget the saved tags and covers and read every file again. Your music is not touched.",
+          "action": "Rebuild"
+        },
+        "crossfade": {
+          "name": "Crossfade",
+          "hint": "Fade the end of a song into the start of the next one.",
+          "off": "Off",
+          "seconds": "{seconds} s"
+        },
+        "gapless": {
+          "name": "Gapless playback",
+          "hint": "No silence between tracks of the same album (live albums, mixes)."
+        },
+        "replaygain": {
+          "name": "Volume normalization",
+          "hint": "Use the ReplayGain tags so songs play at a similar loudness.",
+          "off": "Off",
+          "track": "Per track",
+          "album": "Per album"
+        },
+        "resume": {
+          "name": "Resume the queue",
+          "hint": "When Valandy opens, the queue is where you left it (paused)."
+        },
+        "lyrics": {
+          "hint": "Where lyrics come from, in order of priority. The first one that has the song's lyrics wins.",
+          "embedded": {
+            "name": "In the file",
+            "hint": "Lyrics saved in the song's tags."
+          },
+          "local": {
+            "name": ".lrc file",
+            "hint": "A .lrc or .txt file with the same name, next to the song."
+          },
+          "online": {
+            "name": "LRCLIB (internet)",
+            "hint": "Free lyrics database, with synced lyrics for many songs."
+          }
+        },
+        "prefer-synced": {
+          "name": "Prefer synced lyrics",
+          "hint": "If the first lyrics found are not synced, keep looking in the next sources."
+        },
+        "covers": {
+          "hint": "Where covers come from, in order of priority.",
+          "embedded": {
+            "name": "In the file",
+            "hint": "The picture saved in the song's tags."
+          },
+          "local": {
+            "name": "Folder image",
+            "hint": "cover.jpg, folder.jpg or front.jpg next to the songs."
+          },
+          "download": {
+            "name": "Download missing covers",
+            "hint": "Look up albums and songs without a cover on MusicBrainz and the Cover Art Archive."
+          }
+        },
+        "move-up": "Higher priority",
+        "move-down": "Lower priority",
+        "privacy": "Searches on the internet send only the artist, album and song name. Lyrics and covers stay saved on your computer."
+      }
     }
   }
 }

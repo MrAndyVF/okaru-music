@@ -11,6 +11,54 @@ namespace okaru::music {
 
   namespace fs = std::filesystem;
 
+  namespace {
+
+    void readSources(const toml::table* table, SourceOrder& sources) {
+      if (table == nullptr) {
+        return;
+      }
+      if (const auto* order = (*table)["order"].as_array(); order != nullptr && order->size() == kSourceCount) {
+        SourceOrder parsed;
+        std::array<bool, kSourceCount> seen{};
+        bool valid = true;
+        for (std::size_t i = 0; i < kSourceCount; ++i) {
+          const auto value = (*order)[i].value_or<std::int64_t>(-1);
+          valid = valid && value >= 0 && value < static_cast<std::int64_t>(kSourceCount) && !seen[static_cast<std::size_t>(value)];
+          if (valid) {
+            seen[static_cast<std::size_t>(value)] = true;
+            parsed.order[i] = static_cast<Source>(value);
+          }
+        }
+        if (valid) {
+          sources.order = parsed.order;
+        }
+      }
+      if (const auto* enabled = (*table)["enabled"].as_array(); enabled != nullptr) {
+        for (std::size_t i = 0; i < kSourceCount && i < enabled->size(); ++i) {
+          sources.enabled[i] = (*enabled)[i].value_or(true);
+        }
+      }
+    }
+
+    toml::table writeSources(const SourceOrder& sources) {
+      toml::array order;
+      toml::array enabled;
+      for (std::size_t i = 0; i < kSourceCount; ++i) {
+        order.push_back(static_cast<std::int64_t>(sources.order[i]));
+        enabled.push_back(sources.enabled[i]);
+      }
+      return toml::table{{"order", std::move(order)}, {"enabled", std::move(enabled)}};
+    }
+
+  } // namespace
+
+  void SourceOrder::move(std::size_t index, int delta) {
+    const auto target = static_cast<long>(index) + delta;
+    if (index < kSourceCount && target >= 0 && target < static_cast<long>(kSourceCount)) {
+      std::swap(order[index], order[static_cast<std::size_t>(target)]);
+    }
+  }
+
   fs::path statePath() { return fs::path(FileUtils::stateDir()) / "music.toml"; }
 
   MusicState loadState(const fs::path& path) {
@@ -44,6 +92,18 @@ namespace okaru::music {
       if (reverse != nullptr && i < reverse->size()) {
         state.reverse[i] = (*reverse)[i].value_or(false);
       }
+    }
+    if (const auto* settings = root["settings"].as_table()) {
+      auto& out = state.settings;
+      out.crossfade = std::clamp<int>((*settings)["crossfade"].value_or(0), 0, 12);
+      out.gapless = (*settings)["gapless"].value_or(true);
+      const auto gain = (*settings)["replaygain"].value_or<std::int64_t>(0);
+      out.replayGain = gain == 1 ? ReplayGain::Track : gain == 2 ? ReplayGain::Album : ReplayGain::Off;
+      out.resume = (*settings)["resume"].value_or(true);
+      out.scanOnStart = (*settings)["scan_on_start"].value_or(true);
+      out.preferSynced = (*settings)["prefer_synced"].value_or(true);
+      readSources((*settings)["lyrics"].as_table(), out.lyrics);
+      readSources((*settings)["covers"].as_table(), out.covers);
     }
     if (const auto* queue = root["queue"].as_array()) {
       for (const auto& node : *queue) {
@@ -83,6 +143,17 @@ namespace okaru::music {
         {"current", static_cast<std::int64_t>(state.current)},
         {"sort", std::move(sort)},
         {"reverse", std::move(reverse)},
+        {"settings",
+         toml::table{
+             {"crossfade", state.settings.crossfade},
+             {"gapless", state.settings.gapless},
+             {"replaygain", static_cast<std::int64_t>(state.settings.replayGain)},
+             {"resume", state.settings.resume},
+             {"scan_on_start", state.settings.scanOnStart},
+             {"prefer_synced", state.settings.preferSynced},
+             {"lyrics", writeSources(state.settings.lyrics)},
+             {"covers", writeSources(state.settings.covers)},
+         }},
     };
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);

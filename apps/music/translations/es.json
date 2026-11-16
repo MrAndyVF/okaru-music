@@ -9,7 +9,6 @@
       "artists": "Artistas",
       "songs": "Canciones",
       "genres": "Géneros",
-      "folders": "Carpetas de música",
       "add-folder": "Agregar carpeta…",
       "remove-folder": "Quitar {folder} de la biblioteca",
       "scanning": "Leyendo… {count} archivo",
@@ -62,7 +61,84 @@
       "lyrics": "Letra",
       "no-lyrics": "Esta canción no tiene letra.",
       "show-player": "Mostrar reproductor",
-      "hide-player": "Ocultar reproductor"
+      "hide-player": "Ocultar reproductor",
+      "searching-lyrics": "Buscando la letra…",
+      "settings": {
+        "title": "Ajustes",
+        "section": {
+          "library": "Biblioteca",
+          "playback": "Reproducción",
+          "lyrics": "Letras",
+          "covers": "Carátulas"
+        },
+        "scan-on-start": {
+          "name": "Buscar cambios al abrir",
+          "hint": "Lee los archivos nuevos o modificados de tus carpetas cada vez que se abre Valandy."
+        },
+        "rebuild": {
+          "name": "Reconstruir la biblioteca",
+          "hint": "Olvida las etiquetas y carátulas guardadas y vuelve a leer todos los archivos. Tu música no se toca.",
+          "action": "Reconstruir"
+        },
+        "crossfade": {
+          "name": "Fundido entre canciones",
+          "hint": "El final de una canción se mezcla con el comienzo de la siguiente.",
+          "off": "Desactivado",
+          "seconds": "{seconds} s"
+        },
+        "gapless": {
+          "name": "Sin silencios entre pistas",
+          "hint": "Sin cortes entre canciones del mismo álbum (en vivo, mezclas)."
+        },
+        "replaygain": {
+          "name": "Normalizar el volumen",
+          "hint": "Usa las etiquetas ReplayGain para que las canciones suenen a un volumen parecido.",
+          "off": "Desactivado",
+          "track": "Por pista",
+          "album": "Por álbum"
+        },
+        "resume": {
+          "name": "Retomar la cola",
+          "hint": "Al abrir Valandy, la cola queda donde la dejaste (en pausa)."
+        },
+        "lyrics": {
+          "hint": "De dónde sale la letra, en orden de prioridad. Gana la primera que tenga la letra de la canción.",
+          "embedded": {
+            "name": "En el archivo",
+            "hint": "La letra guardada en las etiquetas de la canción."
+          },
+          "local": {
+            "name": "Archivo .lrc",
+            "hint": "Un .lrc o .txt con el mismo nombre, junto a la canción."
+          },
+          "online": {
+            "name": "LRCLIB (internet)",
+            "hint": "Base de letras libre, con letra sincronizada para muchas canciones."
+          }
+        },
+        "prefer-synced": {
+          "name": "Preferir letras sincronizadas",
+          "hint": "Si la primera letra encontrada no está sincronizada, sigue buscando en las siguientes fuentes."
+        },
+        "covers": {
+          "hint": "De dónde sale la carátula, en orden de prioridad.",
+          "embedded": {
+            "name": "En el archivo",
+            "hint": "La imagen guardada en las etiquetas de la canción."
+          },
+          "local": {
+            "name": "Imagen de la carpeta",
+            "hint": "cover.jpg, folder.jpg o front.jpg junto a las canciones."
+          },
+          "download": {
+            "name": "Descargar las carátulas que falten",
+            "hint": "Busca los álbumes y canciones sin carátula en MusicBrainz y en Cover Art Archive."
+          }
+        },
+        "move-up": "Más prioridad",
+        "move-down": "Menos prioridad",
+        "privacy": "Las búsquedas en internet solo envían el artista, el álbum y el nombre de la canción. Las letras y carátulas quedan guardadas en tu equipo."
+      }
     }
   }
 }
