@@ -69,7 +69,8 @@
           "library": "Biblioteca",
           "playback": "Reproducción",
           "lyrics": "Letras",
-          "covers": "Carátulas"
+          "covers": "Carátulas",
+          "equalizer": "Ecualizador"
         },
         "scan-on-start": {
           "name": "Buscar cambios al abrir",
@@ -137,7 +138,15 @@
         },
         "move-up": "Más prioridad",
         "move-down": "Menos prioridad",
-        "privacy": "Las búsquedas en internet solo envían el artista, el álbum y el nombre de la canción. Las letras y carátulas quedan guardadas en tu equipo."
+        "privacy": "Las búsquedas en internet solo envían el artista, el álbum y el nombre de la canción. Las letras y carátulas quedan guardadas en tu equipo.",
+        "equalizer": {
+          "name": "Ecualizador",
+          "hint": "Ajusta graves, medios y agudos en 10 bandas."
+        },
+        "eq-preset": {
+          "name": "Preajuste",
+          "hint": "Moverlas a mano lo deja en «Personalizado»."
+        }
       },
       "playlists": "Listas",
       "favorites": "Favoritas",
@@ -161,7 +170,8 @@
         "add-to": "Agregar a «{name}»",
         "new-playlist": "Nueva lista con esta canción…",
         "remove-from-playlist": "Quitar de esta lista",
-        "add-to-playlist": "Agregar a una lista"
+        "add-to-playlist": "Agregar a una lista",
+        "remove-from-queue": "Quitar de la cola"
       },
       "servers": {
         "title": "Servidores",
@@ -181,7 +191,19 @@
         "missing": "Escribe la dirección y el usuario.",
         "unreachable": "No se pudo llegar al servidor. Revisa la dirección y tu conexión.",
         "rejected": "El servidor rechazó el inicio de sesión ({error})."
-      }
+      },
+      "eq": {
+        "flat": "Plano",
+        "bass": "Más graves",
+        "treble": "Más agudos",
+        "vocal": "Voz",
+        "rock": "Rock",
+        "pop": "Pop",
+        "electronic": "Electrónica",
+        "custom": "Personalizado"
+      },
+      "fullscreen": "Pantalla completa (F11)",
+      "exit-fullscreen": "Salir de pantalla completa (Esc)"
     }
   }
 }

@@ -34,6 +34,8 @@ namespace okaru::music {
     int crossfade = 0; // segundos de fundido entre canciones; 0 = sin fundido
     bool gapless = true;
     ReplayGain replayGain = ReplayGain::Off;
+    bool equalizer = false;
+    EqGains eqGains{};
     bool resume = true;      // al abrir, la cola donde quedó
     bool scanOnStart = true; // al abrir, buscar cambios en las carpetas
     SourceOrder lyrics;

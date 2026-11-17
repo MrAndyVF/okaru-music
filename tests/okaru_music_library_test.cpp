@@ -173,12 +173,15 @@ namespace {
     state.folders = {"/m"};
     state.settings.crossfade = 6;
     state.settings.replayGain = ReplayGain::Album;
+    state.settings.equalizer = true;
+    state.settings.eqGains[0] = 6.0;
     state.settings.lyrics.move(2, -1); // internet antes que el .lrc
     state.settings.covers.enabled[static_cast<std::size_t>(Source::Online)] = false;
     assert(saveState(state, path));
     const MusicState loaded = loadState(path);
     assert(loaded.settings.crossfade == 6);
     assert(loaded.settings.replayGain == ReplayGain::Album);
+    assert(loaded.settings.equalizer && loaded.settings.eqGains[0] == 6.0 && loaded.settings.eqGains[1] == 0.0);
     assert(loaded.settings.lyrics.order[1] == Source::Online && loaded.settings.lyrics.order[2] == Source::Local);
     assert(!loaded.settings.covers.on(Source::Online) && loaded.settings.covers.on(Source::Embedded));
     // Un orden inválido (repetido) se ignora y queda el de fábrica.
@@ -235,6 +238,12 @@ namespace {
     assert(std::is_permutation(out.begin(), out.end(), items.begin(), items.end()));
     assert(formatTime(65) == "1:05");
     assert(formatTime(3723) == "1:02:03");
+    // Ecualizador: plano = sin filtro; con ganancia, baja el volumen lo que más sube y omite las bandas en 0.
+    assert(equalizerFilter(kEqPresets[0].gains).empty());
+    EqGains gains{};
+    gains[0] = 6.0;
+    gains[9] = -20.0; // se limita a -12
+    assert(equalizerFilter(gains) == "lavfi=[volume=-6.0dB,equalizer=f=31:t=o:w=1:g=6.0,equalizer=f=16000:t=o:w=1:g=-12.0]");
   }
 
   void testScan() {

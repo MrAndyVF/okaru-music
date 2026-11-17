@@ -99,6 +99,12 @@ namespace okaru::music {
       out.gapless = (*settings)["gapless"].value_or(true);
       const auto gain = (*settings)["replaygain"].value_or<std::int64_t>(0);
       out.replayGain = gain == 1 ? ReplayGain::Track : gain == 2 ? ReplayGain::Album : ReplayGain::Off;
+      out.equalizer = (*settings)["equalizer"].value_or(false);
+      if (const auto* gains = (*settings)["eq_gains"].as_array()) {
+        for (std::size_t i = 0; i < out.eqGains.size() && i < gains->size(); ++i) {
+          out.eqGains[i] = std::clamp((*gains)[i].value_or(0.0), -kEqMaxGain, kEqMaxGain);
+        }
+      }
       out.resume = (*settings)["resume"].value_or(true);
       out.scanOnStart = (*settings)["scan_on_start"].value_or(true);
       out.preferSynced = (*settings)["prefer_synced"].value_or(true);
@@ -164,6 +170,10 @@ namespace okaru::music {
       sort.push_back(static_cast<std::int64_t>(state.sort[i]));
       reverse.push_back(state.reverse[i]);
     }
+    toml::array eqGains;
+    for (const double gain : state.settings.eqGains) {
+      eqGains.push_back(gain);
+    }
     const toml::table root{
         {"folders", std::move(folders)},
         {"volume", state.volume},
@@ -180,6 +190,8 @@ namespace okaru::music {
              {"crossfade", state.settings.crossfade},
              {"gapless", state.settings.gapless},
              {"replaygain", static_cast<std::int64_t>(state.settings.replayGain)},
+             {"equalizer", state.settings.equalizer},
+             {"eq_gains", eqGains},
              {"resume", state.settings.resume},
              {"scan_on_start", state.settings.scanOnStart},
              {"prefer_synced", state.settings.preferSynced},

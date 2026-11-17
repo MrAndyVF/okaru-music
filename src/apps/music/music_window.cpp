@@ -40,6 +40,8 @@ namespace okaru::music {
     constexpr float kVolumeSliderFrom = 760.0F;   // desde este ancho se ve la barra de volumen
     constexpr float kSongInfoFrom = 620.0F;       // desde este ancho, título y artista junto a la carátula de abajo
     constexpr float kNowPlayingHeight = 88.0F;
+    constexpr float kMiniBelowWidth = 560.0F;  // bajo este ancho (o el alto de abajo) la ventana es la miniventana
+    constexpr float kMiniBelowHeight = 360.0F;
     constexpr float kRowHeight = 52.0F;
     constexpr float kAlbumMinWidth = 168.0F;
     constexpr float kAlbumTextHeight = 48.0F;
@@ -1051,6 +1053,9 @@ namespace okaru::music {
       );
       m_nowArtist->setText(track != nullptr ? joinDot({track->artist, track->album}) : "");
       m_nowCover->setCover(track != nullptr ? track->cover : "");
+      if (m_miniBackground != nullptr) {
+        m_miniBackground->setCover(track != nullptr ? track->cover : "");
+      }
       if (m_likeButton != nullptr) {
         m_likeButton->setGlyph(m_playlists.liked(item) ? "heart-filled" : "heart");
         m_likeButton->setEnabled(track != nullptr);
@@ -1067,6 +1072,8 @@ namespace okaru::music {
     if (m_playButton != nullptr) {
       m_playButton->setGlyph(state.paused || state.idle ? "player-play" : "player-pause");
       m_playButton->setTooltip(state.paused ? tr("apps.music.play") : tr("apps.music.pause"));
+    }
+    if (m_shuffleButton != nullptr) {
       m_shuffleButton->setSelected(m_player.shuffled());
       m_repeatButton->setGlyph(repeatGlyph(m_player.repeat()));
       m_repeatButton->setSelected(m_player.repeat() != Repeat::Off);
@@ -1097,6 +1104,7 @@ namespace okaru::music {
     m_playerToggle = nullptr;
     m_search = nullptr;
     m_nowCover = nullptr;
+    m_miniBackground = nullptr;
     m_nowTitle = nullptr;
     m_nowArtist = nullptr;
     m_playButton = nullptr;
@@ -1111,7 +1119,30 @@ namespace okaru::music {
     m_lyricsView = nullptr;
     m_lyricLabelOf.clear();
     m_crossfadeLabel = nullptr;
+    m_eqLabels.fill(nullptr);
     m_animScale = scale;
+
+    if (m_app.fullscreen()) {
+      m_windowWidth = width;
+      auto full = buildFullscreen(width, height, scale);
+      if (!m_menu.empty()) {
+        full->addChild(buildMenu(width, height, scale));
+      }
+      refreshNowPlaying();
+      return full;
+    }
+    if (width < kMiniBelowWidth * scale || height < kMiniBelowHeight * scale) {
+      m_windowWidth = width;
+      auto mini = buildMini(width, height, scale);
+      if (!m_menu.empty()) {
+        mini->addChild(buildMenu(width, height, scale));
+      }
+      if (m_dialog != Dialog::None) {
+        mini->addChild(buildDialog(width, height, scale));
+      }
+      refreshNowPlaying();
+      return mini;
+    }
 
     const float header = kHeaderHeight * scale;
     const float bottom = kNowPlayingHeight * scale;
@@ -1935,6 +1966,12 @@ namespace okaru::music {
                 },
         })
     );
+    bar->addChild(ui::button({
+        .glyph = "maximize",
+        .variant = ButtonVariant::Ghost,
+        .tooltip = tr("apps.music.fullscreen"),
+        .onClick = [this] { setFullscreen(true); },
+    }));
     bar->addChild(
         ui::button({
             .out = &m_playerToggle,
@@ -1948,11 +1985,162 @@ namespace okaru::music {
     return bar;
   }
 
+  std::unique_ptr<Node> MusicWindow::buildMini(float width, float height, float scale) {
+    const float pad = Style::spaceMd * scale;
+    auto root = ui::node({.width = width, .height = height});
+    root->addChild(ui::box({.fill = colorSpecFromRole(ColorRole::Surface), .width = width, .height = height}));
+    auto background = std::make_unique<CoverImage>();
+    background->setBlur(24);
+    background->setSize(width, height);
+    background->setOpacity(0.28F);
+    m_miniBackground = static_cast<CoverImage*>(root->addChild(std::move(background)));
+
+    // Alta y angosta: carátula arriba; si no, a la izquierda.
+    const bool vertical = height > width * 1.2F;
+    const float controls = 116.0F * scale; // título, artista, botones y barra de tiempo
+    const float side = vertical ? std::max(0.0F, std::min(width - pad * 2.0F, height - controls - pad * 3.0F))
+                                : std::max(0.0F, std::min(height - pad * 2.0F, width * 0.4F));
+    const float textWidth = vertical ? width - pad * 2.0F : std::max(0.0F, width - side - pad * 3.0F);
+    auto cover = std::make_unique<CoverImage>();
+    cover->setSize(side, side);
+    cover->setPosition(vertical ? std::round((width - side) * 0.5F) : pad, pad);
+    m_nowCover = static_cast<CoverImage*>(root->addChild(std::move(cover)));
+    m_app.setDragNode(m_nowCover); // la carátula mueve la ventana flotante
+
+    auto info = ui::column({.align = FlexAlign::Center, .gap = 2.0F * scale, .width = textWidth});
+    info->addChild(ui::label({.out = &m_nowTitle, .text = "", .fontSize = Style::fontSizeBody * scale, .fontWeight = FontWeight::SemiBold, .maxWidth = textWidth, .maxLines = 1}));
+    info->addChild(ui::label({.out = &m_nowArtist, .text = "", .fontSize = Style::fontSizeCaption * scale, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant), .maxWidth = textWidth, .maxLines = 1}));
+    auto buttons = ui::row({.align = FlexAlign::Center, .gap = Style::spaceXs * scale});
+    buttons->addChild(ui::button({.glyph = "player-track-prev", .variant = ButtonVariant::Ghost, .tooltip = tr("apps.music.previous"), .onClick = [this] { m_player.previous(); }}));
+    buttons->addChild(ui::button({.out = &m_playButton, .glyph = "player-play", .variant = ButtonVariant::Primary, .onClick = [this] { m_player.togglePause(); }}));
+    buttons->addChild(ui::button({.glyph = "player-track-next", .variant = ButtonVariant::Ghost, .tooltip = tr("apps.music.next"), .onClick = [this] { m_player.next(); }}));
+    buttons->addChild(ui::button({
+        .out = &m_likeButton,
+        .glyph = m_playlists.liked(m_player.currentItem()) ? "heart-filled" : "heart",
+        .enabled = currentTrack() != nullptr,
+        .variant = ButtonVariant::Ghost,
+        .tooltip = tr("apps.music.like"),
+        .onClick =
+            [this] {
+              if (currentTrack() != nullptr) {
+                toggleLike(m_player.currentItem());
+              }
+            },
+    }));
+    info->addChild(std::move(buttons));
+    info->addChild(ui::row(
+        {.align = FlexAlign::Center, .gap = Style::spaceXs * scale, .width = textWidth},
+        ui::label({.out = &m_positionLabel, .text = "0:00", .fontSize = Style::fontSizeCaption * scale, .minWidth = 34.0F * scale, .textAlign = TextAlign::End}),
+        ui::slider({
+            .out = &m_timeline,
+            .minValue = 0.0,
+            .maxValue = 1.0,
+            .value = 0.0,
+            .wheelAdjustEnabled = false,
+            .flexGrow = 1.0F,
+            .onValueChanged =
+                [this](double value) {
+                  if (!m_syncingTimeline) {
+                    m_player.seekTo(value);
+                  }
+                },
+        }),
+        ui::label({.out = &m_durationLabel, .text = "0:00", .fontSize = Style::fontSizeCaption * scale, .minWidth = 34.0F * scale})
+    ));
+    if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
+      info->layout(*renderer);
+    }
+    info->setPosition(
+        vertical ? pad : side + pad * 2.0F,
+        vertical ? side + pad * 2.0F : std::round((height - info->height()) * 0.5F)
+    );
+    root->addChild(std::move(info));
+    return root;
+  }
+
+  void MusicWindow::setFullscreen(bool fullscreen) {
+    m_menu.clear();
+    m_app.setFullscreen(fullscreen);
+    m_app.requestRebuild();
+  }
+
+  std::unique_ptr<Node> MusicWindow::buildFullscreen(float width, float height, float scale) {
+    const float pad = Style::spaceLg * 2.0F * scale;
+    auto root = ui::node({.width = width, .height = height});
+    root->addChild(ui::box({.fill = colorSpecFromRole(ColorRole::Surface), .width = width, .height = height}));
+    auto background = std::make_unique<CoverImage>();
+    background->setBlur(32);
+    background->setSize(width, height);
+    background->setOpacity(0.45F);
+    m_miniBackground = static_cast<CoverImage*>(root->addChild(std::move(background)));
+
+    // Abajo: barra de tiempo y controles; encima, a la izquierda, la carátula con el título grande.
+    const float controlsHeight = 96.0F * scale;
+    const float side = std::clamp(std::min(width, height) * 0.32F, 120.0F * scale, 420.0F * scale);
+    const float songTop = height - pad - controlsHeight - side;
+    auto cover = std::make_unique<CoverImage>();
+    cover->setSize(side, side);
+    cover->setPosition(pad, songTop);
+    m_nowCover = static_cast<CoverImage*>(root->addChild(std::move(cover)));
+
+    const float textWidth = std::max(0.0F, width - side - pad * 3.0F);
+    auto info = ui::column({.align = FlexAlign::Start, .gap = Style::spaceSm * scale, .width = textWidth});
+    info->addChild(ui::label({.out = &m_nowTitle, .text = "", .fontSize = Style::fontSizeHeader * 2.0F * scale, .fontWeight = FontWeight::Bold, .maxWidth = textWidth, .maxLines = 2}));
+    info->addChild(ui::label({.out = &m_nowArtist, .text = "", .fontSize = Style::fontSizeTitle * scale, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant), .maxWidth = textWidth, .maxLines = 1}));
+    if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
+      info->layout(*renderer);
+    }
+    info->setPosition(side + pad * 2.0F, songTop + side - info->height());
+    root->addChild(std::move(info));
+
+    const float barWidth = width - pad * 2.0F;
+    auto controls = ui::column({.align = FlexAlign::Center, .gap = Style::spaceXs * scale, .width = barWidth});
+    controls->addChild(ui::row(
+        {.align = FlexAlign::Center, .gap = Style::spaceSm * scale, .width = barWidth},
+        ui::label({.out = &m_positionLabel, .text = "0:00", .fontSize = Style::fontSizeCaption * scale, .minWidth = 44.0F * scale, .textAlign = TextAlign::End}),
+        ui::slider({
+            .out = &m_timeline,
+            .minValue = 0.0,
+            .maxValue = 1.0,
+            .value = 0.0,
+            .wheelAdjustEnabled = false,
+            .flexGrow = 1.0F,
+            .onValueChanged =
+                [this](double value) {
+                  if (!m_syncingTimeline) {
+                    m_player.seekTo(value);
+                  }
+                },
+        }),
+        ui::label({.out = &m_durationLabel, .text = "0:00", .fontSize = Style::fontSizeCaption * scale, .minWidth = 44.0F * scale})
+    ));
+    auto buttons = ui::row({.align = FlexAlign::Center, .gap = Style::spaceSm * scale});
+    buttons->addChild(ui::button({.out = &m_likeButton, .glyph = m_playlists.liked(m_player.currentItem()) ? "heart-filled" : "heart", .enabled = currentTrack() != nullptr, .variant = ButtonVariant::Ghost, .tooltip = tr("apps.music.like"), .onClick = [this] {
+                                    if (currentTrack() != nullptr) {
+                                      toggleLike(m_player.currentItem());
+                                    }
+                                  }}));
+    buttons->addChild(ui::button({.out = &m_shuffleButton, .glyph = "arrows-shuffle", .variant = ButtonVariant::Ghost, .tooltip = tr("apps.music.shuffle"), .onClick = [this] { m_player.setShuffle(!m_player.shuffled()); }}));
+    buttons->addChild(ui::button({.glyph = "player-track-prev", .variant = ButtonVariant::Ghost, .tooltip = tr("apps.music.previous"), .onClick = [this] { m_player.previous(); }}));
+    buttons->addChild(ui::button({.out = &m_playButton, .glyph = "player-play", .variant = ButtonVariant::Primary, .onClick = [this] { m_player.togglePause(); }}));
+    buttons->addChild(ui::button({.glyph = "player-track-next", .variant = ButtonVariant::Ghost, .tooltip = tr("apps.music.next"), .onClick = [this] { m_player.next(); }}));
+    buttons->addChild(ui::button({.out = &m_repeatButton, .glyph = "repeat", .variant = ButtonVariant::Ghost, .tooltip = tr("apps.music.repeat"), .onClick = [this] {
+                                    const Repeat next = m_player.repeat() == Repeat::Off ? Repeat::All
+                                        : m_player.repeat() == Repeat::All               ? Repeat::One
+                                                                                         : Repeat::Off;
+                                    m_player.setRepeat(next);
+                                  }}));
+    buttons->addChild(ui::button({.glyph = "minimize", .variant = ButtonVariant::Ghost, .tooltip = tr("apps.music.exit-fullscreen"), .onClick = [this] { setFullscreen(false); }}));
+    controls->addChild(std::move(buttons));
+    if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
+      controls->layout(*renderer);
+    }
+    controls->setPosition(pad, height - pad * 0.5F - controls->height());
+    root->addChild(std::move(controls));
+    return root;
+  }
+
   // ── Reproductor a pantalla completa ──────────────────────────────────────────────────────────────
-
-  namespace {
-
-  } // namespace
 
   std::unique_ptr<Node> MusicWindow::buildFullPlayer(float width, float height, float scale) {
     m_queueAdapter.reset();
@@ -2118,7 +2306,7 @@ namespace okaru::music {
             .menu =
                 [this](std::size_t index, float x, float y) {
                   if (index < m_player.state().queue.size()) {
-                    openSongMenu({m_player.state().queue[index]}, x, y);
+                    openSongMenu({m_player.state().queue[index]}, x, y, 0, 0, static_cast<std::int64_t>(index));
                   }
                 },
         }
@@ -2390,6 +2578,7 @@ namespace okaru::music {
     m_player.setCrossfade(settings.crossfade);
     m_player.setGapless(settings.gapless);
     m_player.setReplayGain(static_cast<int>(settings.replayGain));
+    m_player.setEqualizer(settings.equalizer ? &settings.eqGains : nullptr);
   }
 
   void MusicWindow::fetchMissingCovers() {
@@ -2832,6 +3021,77 @@ namespace okaru::music {
     ));
     page->addChild(setting("apps.music.settings.resume", toggle(settings.resume)));
 
+    // Ecualizador.
+    page->addChild(section("adjustments-horizontal", "apps.music.settings.section.equalizer"));
+    page->addChild(setting("apps.music.settings.equalizer", toggle(settings.equalizer, [this] { applySettings(); })));
+    {
+      std::vector<std::string> presets;
+      std::size_t selected = kEqPresets.size(); // «personalizado»
+      for (std::size_t i = 0; i < kEqPresets.size(); ++i) {
+        presets.push_back(tr(std::string("apps.music.eq.") + kEqPresets[i].name));
+        if (kEqPresets[i].gains == settings.eqGains) {
+          selected = i;
+        }
+      }
+      presets.push_back(tr("apps.music.eq.custom"));
+      page->addChild(setting(
+          "apps.music.settings.eq-preset",
+          ui::select({
+              .options = std::move(presets),
+              .selectedIndex = selected,
+              .width = 170.0F * scale,
+              .onSelectionChanged =
+                  [this](std::size_t index, std::string_view) {
+                    if (index < kEqPresets.size()) {
+                      m_state.settings.eqGains = kEqPresets[index].gains;
+                      applySettings();
+                      saveState();
+                      m_app.requestRebuild();
+                    }
+                  },
+          })
+      ));
+      const auto gainText = [](double gain) { return std::format("{:+.0f} dB", gain); };
+      for (std::size_t band = 0; band < kEqBands.size(); ++band) {
+        const int hz = kEqBands[band];
+        auto row = ui::row({.align = FlexAlign::Center, .gap = Style::spaceSm * scale, .width = inner});
+        row->addChild(ui::label({
+            .text = hz >= 1000 ? std::format("{} kHz", hz / 1000) : std::format("{} Hz", hz),
+            .fontSize = Style::fontSizeCaption * scale,
+            .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+            .minWidth = 64.0F * scale,
+        }));
+        row->addChild(ui::slider({
+            .minValue = -kEqMaxGain,
+            .maxValue = kEqMaxGain,
+            .step = 1.0,
+            .value = settings.eqGains[band],
+            .flexGrow = 1.0F,
+            .onValueChanged =
+                [this, band, gainText](double value) {
+                  m_state.settings.eqGains[band] = value;
+                  applySettings();
+                  if (m_eqLabels[band] != nullptr) {
+                    m_eqLabels[band]->setText(gainText(value));
+                    m_app.invalidate();
+                  }
+                },
+            .onDragEnd =
+                [this] {
+                  saveState();
+                  m_app.requestRebuild(); // el preajuste pasa a «personalizado»
+                },
+        }));
+        row->addChild(ui::label({
+            .out = &m_eqLabels[band],
+            .text = gainText(settings.eqGains[band]),
+            .fontSize = Style::fontSizeCaption * scale,
+            .minWidth = 56.0F * scale,
+        }));
+        page->addChild(std::move(row));
+      }
+    }
+
     // Letras.
     page->addChild(section("microphone-2", "apps.music.settings.section.lyrics"));
     page->addChild(ui::label({
@@ -2910,7 +3170,9 @@ namespace okaru::music {
     m_app.invalidate();
   }
 
-  void MusicWindow::openSongMenu(std::vector<std::string> paths, float x, float y, std::int64_t playlist, std::size_t index) {
+  void MusicWindow::openSongMenu(
+      std::vector<std::string> paths, float x, float y, std::int64_t playlist, std::size_t index, std::int64_t queueIndex
+  ) {
     if (paths.empty()) {
       return;
     }
@@ -2920,7 +3182,6 @@ namespace okaru::music {
     const bool liked = m_playlists.liked(paths.front());
     menu.push_back({liked ? tr("apps.music.menu.unlike") : tr("apps.music.like"), [this, path = paths.front()] { toggleLike(path); }});
     if (const auto it = m_byPath.find(paths.front()); it != m_byPath.end()) {
-      const Track& track = m_model.tracks[it->second];
       for (std::size_t a = 0; a < m_model.albums.size(); ++a) {
         if (std::ranges::contains(m_model.albums[a].tracks, it->second)) {
           menu.push_back({tr("apps.music.menu.go-to-album"), [this, a] {
@@ -2931,7 +3192,6 @@ namespace okaru::music {
           break;
         }
       }
-      (void)track;
     }
     menu.push_back({.separator = true});
     for (const Playlist& list : m_playlists.all()) {
@@ -2940,6 +3200,12 @@ namespace okaru::music {
       }
     }
     menu.push_back({tr("apps.music.menu.new-playlist"), [this, paths] { openDialog(Dialog::NewPlaylist, paths); }});
+    if (queueIndex >= 0) {
+      menu.push_back({.separator = true});
+      menu.push_back({tr("apps.music.menu.remove-from-queue"), [this, queueIndex] {
+                        m_player.removeAt(static_cast<std::size_t>(queueIndex));
+                      }});
+    }
     if (playlist != 0) {
       menu.push_back({.separator = true});
       menu.push_back({tr("apps.music.menu.remove-from-playlist"), [this, playlist, index] {
@@ -3221,6 +3487,10 @@ namespace okaru::music {
         m_app.requestRebuild();
         return true;
       }
+      if (m_app.fullscreen()) {
+        setFullscreen(false);
+        return true;
+      }
       if (m_fullPlayer) {
         setFullPlayer(false);
         return true;
@@ -3230,6 +3500,9 @@ namespace okaru::music {
         return true;
       }
       return false;
+    case XKB_KEY_F11:
+      setFullscreen(!m_app.fullscreen());
+      return true;
     case XKB_KEY_XF86AudioPlay:
       m_player.togglePause();
       return true;

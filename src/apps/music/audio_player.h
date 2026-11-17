@@ -6,6 +6,7 @@
 
 #include "core/timer_manager.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -20,6 +21,27 @@ struct mpv_handle;
 namespace okaru::music {
 
   enum class Repeat : std::uint8_t { Off, All, One };
+
+  // Ecualizador de 10 bandas (frecuencias ISO, en Hz) y ganancia por banda en dB (±12).
+  inline constexpr std::array<int, 10> kEqBands{31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000};
+  using EqGains = std::array<double, kEqBands.size()>;
+  inline constexpr double kEqMaxGain = 12.0;
+  // Preajustes: nombre (clave i18n apps.music.eq.<nombre>) y ganancias.
+  struct EqPreset {
+    const char* name;
+    EqGains gains;
+  };
+  inline constexpr std::array<EqPreset, 7> kEqPresets{{
+      {"flat", {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+      {"bass", {6, 5, 4, 2, 0, 0, 0, 0, 0, 0}},
+      {"treble", {0, 0, 0, 0, 0, 1, 2, 4, 5, 6}},
+      {"vocal", {-2, -2, -1, 1, 3, 4, 3, 1, 0, -1}},
+      {"rock", {4, 3, 2, 0, -1, -1, 1, 2, 3, 4}},
+      {"pop", {-1, 0, 2, 3, 4, 3, 2, 0, -1, -1}},
+      {"electronic", {5, 4, 1, 0, -2, 1, 0, 2, 4, 5}},
+  }};
+  // Cadena para la propiedad "af" de mpv; vacía si todo está en 0. Baja el volumen lo que más se sube (sin saturar).
+  [[nodiscard]] std::string equalizerFilter(const EqGains& gains);
 
   struct PlayerState {
     double position = 0.0;
@@ -78,6 +100,8 @@ namespace okaru::music {
     void setGapless(bool gapless);
     // 0 sin normalizar, 1 por pista, 2 por álbum (ReplayGain de las etiquetas).
     void setReplayGain(int mode);
+    // Ecualizador (vacío = apagado), también para la canción que se va en el fundido.
+    void setEqualizer(const EqGains* gains);
 
   private:
     // Fundido: otro mpv («cola») sigue tocando el final de la canción que se va, bajando, mientras la principal ya
@@ -102,6 +126,8 @@ namespace okaru::music {
     std::function<std::string(const std::string&)> m_resolver;
     std::unordered_map<std::string, std::string> m_itemOf; // lo que se le dio a mpv → ruta de la biblioteca
     int m_crossfade = 0;
+    std::string m_replayGain = "no";
+    std::string m_filter; // "af" de mpv (ecualizador)
     mpv_handle* m_tail = nullptr;
     Timer m_fadeTimer;
     std::chrono::steady_clock::time_point m_fadeStart;

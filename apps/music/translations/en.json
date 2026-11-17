@@ -69,7 +69,8 @@
           "library": "Library",
           "playback": "Playback",
           "lyrics": "Lyrics",
-          "covers": "Covers"
+          "covers": "Covers",
+          "equalizer": "Equalizer"
         },
         "scan-on-start": {
           "name": "Look for changes on start",
@@ -137,7 +138,15 @@
         },
         "move-up": "Higher priority",
         "move-down": "Lower priority",
-        "privacy": "Searches on the internet send only the artist, album and song name. Lyrics and covers stay saved on your computer."
+        "privacy": "Searches on the internet send only the artist, album and song name. Lyrics and covers stay saved on your computer.",
+        "equalizer": {
+          "name": "Equalizer",
+          "hint": "Adjust bass, mids and treble across 10 bands."
+        },
+        "eq-preset": {
+          "name": "Preset",
+          "hint": "Moving a band by hand switches to “Custom”."
+        }
       },
       "playlists": "Playlists",
       "favorites": "Favorites",
@@ -161,7 +170,8 @@
         "add-to": "Add to «{name}»",
         "new-playlist": "New playlist with this song…",
         "remove-from-playlist": "Remove from this playlist",
-        "add-to-playlist": "Add to playlist"
+        "add-to-playlist": "Add to playlist",
+        "remove-from-queue": "Remove from queue"
       },
       "servers": {
         "title": "Servers",
@@ -181,7 +191,19 @@
         "missing": "Write the address and the user.",
         "unreachable": "The server could not be reached. Check the address and your connection.",
         "rejected": "The server rejected the login ({error})."
-      }
+      },
+      "eq": {
+        "flat": "Flat",
+        "bass": "Bass boost",
+        "treble": "Treble boost",
+        "vocal": "Vocal",
+        "rock": "Rock",
+        "pop": "Pop",
+        "electronic": "Electronic",
+        "custom": "Custom"
+      },
+      "fullscreen": "Fullscreen (F11)",
+      "exit-fullscreen": "Exit fullscreen (Esc)"
     }
   }
 }

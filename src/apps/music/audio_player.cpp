@@ -182,7 +182,10 @@ namespace okaru::music {
 
   void AudioPlayer::removeAt(std::size_t index) {
     if (index < m_state.queue.size()) {
-      std::erase(m_original, m_state.queue[index]);
+      // Solo una aparición: la misma canción puede estar dos veces en la cola.
+      if (const auto it = std::ranges::find(m_original, m_state.queue[index]); it != m_original.end()) {
+        m_original.erase(it);
+      }
       command({"playlist-remove", std::to_string(index)});
     }
   }
@@ -346,8 +349,22 @@ namespace okaru::music {
   }
 
   void AudioPlayer::setReplayGain(int mode) {
+    m_replayGain = mode == 1 ? "track" : mode == 2 ? "album" : "no";
     if (m_mpv != nullptr) {
-      mpv_set_property_string(m_mpv, "replaygain", mode == 1 ? "track" : mode == 2 ? "album" : "no");
+      mpv_set_property_string(m_mpv, "replaygain", m_replayGain.c_str());
+    }
+  }
+
+  void AudioPlayer::setEqualizer(const EqGains* gains) {
+    std::string filter = gains != nullptr ? equalizerFilter(*gains) : std::string();
+    if (filter == m_filter) {
+      return;
+    }
+    m_filter = std::move(filter);
+    for (mpv_handle* handle : {m_mpv, m_tail}) {
+      if (handle != nullptr) {
+        mpv_set_property_string(handle, "af", m_filter.c_str());
+      }
     }
   }
 
@@ -367,7 +384,7 @@ namespace okaru::music {
     }
     const std::string volume = std::format("{:.1f}", s.volume);
     const std::string start = std::format("{:.3f}", s.position);
-    for (const auto& [name, value] : std::array<std::pair<const char*, std::string>, 8>{{
+    for (const auto& [name, value] : std::array<std::pair<const char*, std::string>, 10>{{
              {"vo", "null"},
              {"video", "no"},
              {"audio-display", "no"},
@@ -376,6 +393,8 @@ namespace okaru::music {
              {"volume", volume},
              {"mute", s.muted ? "yes" : "no"},
              {"start", start},
+             {"replaygain", m_replayGain},
+             {"af", m_filter},
          }}) {
       mpv_set_option_string(m_tail, name, value.c_str());
     }
@@ -465,6 +484,23 @@ namespace okaru::music {
     }
     m_itemOf[url] = item;
     return url;
+  }
+
+  std::string equalizerFilter(const EqGains& gains) {
+    std::string graph;
+    double boost = 0.0;
+    for (std::size_t i = 0; i < gains.size(); ++i) {
+      const double gain = std::clamp(gains[i], -kEqMaxGain, kEqMaxGain);
+      if (std::abs(gain) < 0.05) {
+        continue;
+      }
+      boost = std::max(boost, gain);
+      graph += std::format(",equalizer=f={}:t=o:w=1:g={:.1f}", kEqBands[i], gain);
+    }
+    if (graph.empty()) {
+      return {};
+    }
+    return std::format("lavfi=[volume={:.1f}dB{}]", -boost, graph);
   }
 
   std::string formatTime(double seconds) {

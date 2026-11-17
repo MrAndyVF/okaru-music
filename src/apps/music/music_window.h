@@ -70,6 +70,11 @@ namespace okaru::music {
     [[nodiscard]] std::unique_ptr<Node> buildSidebar(float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildContent(float width, float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildNowPlaying(float width, float scale);
+    // Miniventana: con la ventana pequeña (flotante), solo carátula, canción y controles.
+    [[nodiscard]] std::unique_ptr<Node> buildMini(float width, float height, float scale);
+    // Pantalla completa (estilo Spotify): fondo con la carátula, la canción grande abajo y los controles.
+    [[nodiscard]] std::unique_ptr<Node> buildFullscreen(float width, float height, float scale);
+    void setFullscreen(bool fullscreen);
     [[nodiscard]] std::unique_ptr<Node> buildFullPlayer(float width, float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildQueuePanel(float width, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildLyricsPanel(float width, float scale);
@@ -113,7 +118,11 @@ namespace okaru::music {
       std::function<void()> action;
       bool separator = false;
     };
-    void openSongMenu(std::vector<std::string> paths, float x, float y, std::int64_t playlist = 0, std::size_t index = 0);
+    // `playlist`/`index`: la fila es de esa lista; `queueIndex`: la fila es de la cola (se puede quitar de ella).
+    void openSongMenu(
+        std::vector<std::string> paths, float x, float y, std::int64_t playlist = 0, std::size_t index = 0,
+        std::int64_t queueIndex = -1
+    );
     [[nodiscard]] std::unique_ptr<Node> buildMenu(float width, float height, float scale);
     // Diálogo con un nombre (nueva lista o renombrar).
     enum class Dialog : std::uint8_t { None, NewPlaylist, RenamePlaylist, AddServer };
@@ -238,6 +247,7 @@ namespace okaru::music {
     VirtualListView* m_queueList = nullptr;
     Input* m_search = nullptr;
     CoverImage* m_nowCover = nullptr;
+    CoverImage* m_miniBackground = nullptr;
     Label* m_nowTitle = nullptr;
     Label* m_nowArtist = nullptr;
     Button* m_playButton = nullptr;
@@ -260,6 +270,7 @@ namespace okaru::music {
     std::unordered_set<std::string> m_coversFetching;
     Timer m_coverRebuild;
     Label* m_crossfadeLabel = nullptr;
+    std::array<Label*, kEqBands.size()> m_eqLabels{};
 
     std::unique_ptr<MprisServer> m_mpris; // último: se va antes que m_player
   };
