@@ -2215,6 +2215,7 @@ namespace okaru::music {
             .minValue = 0.0,
             .maxValue = 1.0,
             .value = 0.0,
+            .trackHeight = 6.0F * scale,
             .wheelAdjustEnabled = false,
             .flexGrow = 1.0F,
             .onValueChanged =
@@ -2271,6 +2272,16 @@ namespace okaru::music {
       controls->layout(*renderer);
     }
     controls->setPosition(pad, height - pad - controls->height() + Style::spaceLg * scale);
+    // Panel translúcido detrás del tiempo y los controles: se leen sobre cualquier color del fondo.
+    const float inset = Style::spaceMd * scale;
+    auto panel = ui::box({
+        .fill = colorSpecFromRole(ColorRole::Surface, 0.8F),
+        .radius = Style::spaceLg * scale,
+        .width = controls->width() + inset * 2.0F,
+        .height = controls->height() + inset * 2.0F,
+    });
+    panel->setPosition(controls->x() - inset, controls->y() - inset);
+    root->addChild(std::move(panel));
     root->addChild(std::move(controls));
     return root;
   }
