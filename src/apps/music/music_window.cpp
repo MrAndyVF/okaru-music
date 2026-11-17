@@ -2897,6 +2897,7 @@ namespace okaru::music {
         .out = &m_lyricsView,
         .state = &m_lyricsScroll,
         .contentScale = scale,
+        .scrollbarVisible = false, // la letra se desplaza con la rueda, sin barra a la vista
         .width = width,
         .flexGrow = 1.0F,
     });
