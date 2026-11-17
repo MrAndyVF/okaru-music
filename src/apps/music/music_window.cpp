@@ -2094,8 +2094,9 @@ namespace okaru::music {
           for (int x = 0; x < size; ++x) {
             const float dx = (static_cast<float>(x) + 0.5F - half) / half;
             const float dy = (static_cast<float>(y) + 0.5F - half) / half;
-            const float d = std::min(1.0F, dx * dx + dy * dy);
-            const float falloff = (1.0F - d) * (1.0F - d);
+            // Núcleo sólido hasta el 50 % del radio y borde difuso (smoothstep) hasta el final.
+            const float r = std::clamp((std::sqrt(dx * dx + dy * dy) - 0.5F) / 0.5F, 0.0F, 1.0F);
+            const float falloff = 1.0F - r * r * (3.0F - 2.0F * r);
             const auto a = static_cast<std::uint8_t>(std::lround(falloff * 255.0F));
             std::fill_n(pixels.begin() + (y * size + x) * 4, 4, a);
           }
@@ -2156,7 +2157,7 @@ namespace okaru::music {
     if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
       const auto& texture = lavaTexture(kLavaTexture);
       for (const LavaPath& path : kLavaPaths) {
-        const float size = std::round(base * path.size * 1.3F); // el borde se desvanece: más grande que se ve
+        const float size = std::round(base * path.size * 1.1F); // el borde se desvanece: algo más grande que se ve
         auto blob = std::make_unique<Image>();
         blob->setSourceRaw(*renderer, texture.data(), texture.size(), kLavaTexture, kLavaTexture, kLavaTexture * 4, PixmapFormat::RGBA);
         blob->setFit(ImageFit::Stretch);
