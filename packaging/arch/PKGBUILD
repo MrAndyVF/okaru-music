@@ -8,7 +8,8 @@ url='https://github.com/MrAndyVF/okaru-music'
 license=(MIT)
 # Sin ABI estable: depende de la versión exacta del núcleo con el que se compiló (la instalada al compilar).
 _core=$(pacman -Q okaru-core 2>/dev/null | cut -d' ' -f2)
-depends=("okaru-core${_core:+=$_core}" mpv taglib sqlite libsecret)
+depends=("okaru-core${_core:+=$_core}" mpv taglib sqlite libsecret openssl)
+optdepends=('yt-dlp: YouTube Music')
 makedepends=(meson ninja pkgconf okaru-core tomlplusplus nlohmann-json) # nlohmann-json: la piden las cabeceras del núcleo (okaru-core <= 1.2.4 no la declaraba)
 options=('!debug' '!lto')
 source=("okaru-music::git+file://${OKARU_MUSIC_REPO:-$HOME/Projects/okaru-project/okaru-music}#branch=main")
