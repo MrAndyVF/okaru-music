@@ -183,6 +183,7 @@ namespace {
     state.settings.eqGains[0] = 6.0;
     state.settings.lyrics.move(2, -1); // internet antes que el .lrc
     state.settings.covers.enabled[static_cast<std::size_t>(Source::Online)] = false;
+    state.extras = {{.path = "yt://ab/v1", .title = "Canción", .artist = "Alguien", .duration = 180.5}};
     assert(saveState(state, path));
     const MusicState loaded = loadState(path);
     assert(loaded.settings.crossfade == 6);
@@ -190,6 +191,7 @@ namespace {
     assert(loaded.settings.equalizer && loaded.settings.eqGains[0] == 6.0 && loaded.settings.eqGains[1] == 0.0);
     assert(loaded.settings.lyrics.order[1] == Source::Online && loaded.settings.lyrics.order[2] == Source::Local);
     assert(!loaded.settings.covers.on(Source::Online) && loaded.settings.covers.on(Source::Embedded));
+    assert(loaded.extras.size() == 1 && loaded.extras[0].title == "Canción" && loaded.extras[0].duration == 180.5);
     // Un orden inválido (repetido) se ignora y queda el de fábrica.
     std::ofstream(path) << "[settings.lyrics]\norder = [0, 0, 1]\n";
     assert(loadState(path).settings.lyrics.order[2] == Source::Online);
@@ -202,23 +204,29 @@ namespace {
     {
       Playlists lists(path);
       assert(lists.all().empty());
-      assert(lists.toggleLike("/m/a.flac")); // nace «Favoritas»
+      assert(lists.toggleLike("/m/a.flac", "local")); // nace «Favoritas» de este equipo
       assert(lists.all().size() == 1 && lists.all()[0].favorites && lists.liked("/m/a.flac"));
-      assert(lists.toggleLike("/m/b.flac"));
+      assert(lists.toggleLike("/m/b.flac", "local"));
       assert(lists.all()[0].items.front() == "/m/b.flac"); // la más reciente arriba
-      assert(!lists.toggleLike("/m/a.flac") && !lists.liked("/m/a.flac"));
-      const auto id = lists.create("Viaje");
+      assert(!lists.toggleLike("/m/a.flac", "local") && !lists.liked("/m/a.flac"));
+      assert(lists.toggleLike("yt://ab/v1", "ab")); // otro origen: otra «Favoritas»
+      assert(lists.all().size() == 2 && lists.all()[0].origin == "ab" && lists.all()[0].items.size() == 1);
+      assert(!lists.toggleLike("yt://ab/v1", "ab") && lists.all()[0].items.empty());
+      const auto id = lists.create("Viaje", "");
       lists.add(id, {"/m/x.flac", "/m/y.flac", "/m/x.flac"}); // sin repetidas
       assert(lists.find(id)->items.size() == 2);
       lists.removeItem(id, 0);
       lists.rename(id, "Ruta");
       assert(lists.find(id)->items == std::vector<std::string>{"/m/y.flac"});
+      lists.create("Rock", "ab");
     }
-    Playlists reopened(path); // todo quedó guardado
-    assert(reopened.all().size() == 2 && reopened.all()[0].favorites && reopened.all()[1].name == "Ruta");
+    Playlists reopened(path); // todo quedó guardado, con su origen
+    assert(reopened.all().size() == 4 && reopened.all()[0].favorites && reopened.all()[1].favorites);
+    assert(reopened.all()[2].name == "Ruta" && reopened.all()[2].origin.empty() && reopened.all()[3].origin == "ab");
     assert(reopened.liked("/m/b.flac") && !reopened.liked("/m/a.flac"));
-    reopened.remove(reopened.all()[1].id);
-    assert(reopened.all().size() == 1);
+    reopened.remove(reopened.all()[3].id);
+    reopened.remove(reopened.all()[2].id);
+    assert(reopened.all().size() == 2 && reopened.liked("/m/b.flac"));
     for (const char* suffix : {"", "-wal", "-shm"}) {
       fs::remove(path.string() + suffix);
     }
@@ -294,6 +302,14 @@ namespace {
                              col({run("El Nervio Del Volcán", "MUSIC_PAGE_TYPE_ALBUM", "MPREb_2")})}},
             {"fixedColumns", {{{"musicResponsiveListItemFixedColumnRenderer", {{"text", {{"runs", {run("1:02:03")}}}}}}}}}}}},
         {{"musicResponsiveListItemRenderer", {{"flexColumns", {col({run("Gustavo Cerati", "MUSIC_PAGE_TYPE_ARTIST", "UC1")})}}}}},
+        // Video de un canal (aunque esté en «Me gusta»): fuera.
+        {{"musicResponsiveListItemRenderer", {
+            {"flexColumns", {col({{{"text", "bad guy (Lyrics)"}, {"navigationEndpoint", {{"watchEndpoint", {{"videoId", "4-TbQnONe_w"},
+                {"watchEndpointMusicSupportedConfigs", {{"watchEndpointMusicConfig", {{"musicVideoType", "MUSIC_VIDEO_TYPE_UGC"}}}}}}}}}}}),
+                             col({run("7clouds")})}}}}},
+        // No disponible (en gris): fuera.
+        {{"musicResponsiveListItemRenderer", {{"musicItemRendererDisplayPolicy", "MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT"},
+            {"playlistItemData", {{"videoId", "lhYKJh37AgY"}}}, {"flexColumns", {col({run("Nuestro Anillito")}), col({run("Pastor López")})}}}}},
         {{"continuationItemRenderer", {{"continuationEndpoint", {{"continuationCommand", {{"token", "TOKEN"}}}}}}}},
     }}};
     const auto tracks = parseYtTracks(response);
@@ -303,6 +319,13 @@ namespace {
     assert(ytCoverSize(tracks[0].thumbnail, 544) == "https://x/a=w544-h544-l90-rj");
     assert(tracks[1].videoId == "abcdefghijk" && tracks[1].artist == "Caifanes, Saúl" && tracks[1].duration == 3723.0);
     assert(parseYtContinuation(response).token == "TOKEN" && parseYtContinuation(response).inBody);
+    // Audio de un canal con el tipo solo en el botón de la carátula (el título no enlaza): fuera.
+    nlohmann::json episode{{"musicResponsiveListItemRenderer", {{"playlistItemData", {{"videoId", "g1k-oT3VfCA"}}},
+        {"flexColumns", {col({run("Gangsta's Paradise (mix)")}), col({run("DonPartyEs")})}}}}};
+    episode["musicResponsiveListItemRenderer"]["overlay"]["musicItemThumbnailOverlayRenderer"]["content"]["musicPlayButtonRenderer"]
+           ["playNavigationEndpoint"]["watchEndpoint"]["watchEndpointMusicSupportedConfigs"]["watchEndpointMusicConfig"]
+           ["musicVideoType"] = "MUSIC_VIDEO_TYPE_PODCAST_EPISODE";
+    assert(parseYtTracks(nlohmann::json{{"contents", {episode}}}).empty());
     assert(parseYtDuration("12 M reproducciones") == 0.0);
 
     // Cookies: lectura, sesión iniciada, firma y formato para yt-dlp.

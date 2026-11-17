@@ -3,6 +3,8 @@
 // OKARU: listas de Valandy (las propias y «Favoritas», que nace con el primer «me gusta»). Son datos del usuario:
 // viven en su propia base (~/.local/state/okaru/music-playlists.db), aparte de la caché de la biblioteca, para que
 // reconstruir la biblioteca nunca las borre. Guardan rutas; una canción que ya no está simplemente no se muestra.
+// Cada lista tiene un origen («local» o el id de un servidor; vacío = mixta, creada con «Todos») y hay una
+// «Favoritas» por origen.
 
 #include <cstdint>
 #include <filesystem>
@@ -18,6 +20,7 @@ namespace okaru::music {
     std::int64_t id = 0;
     std::string name;
     bool favorites = false;
+    std::string origin; // "" mixta, "local" o id del servidor
     std::vector<std::string> items; // rutas, en orden
   };
 
@@ -34,9 +37,9 @@ namespace okaru::music {
     [[nodiscard]] const Playlist* find(std::int64_t id) const;
     [[nodiscard]] bool liked(const std::string& path) const { return m_liked.contains(path); }
 
-    // Me gusta / ya no: crea «Favoritas» si hace falta. Devuelve si quedó con me gusta.
-    bool toggleLike(const std::string& path);
-    std::int64_t create(const std::string& name);
+    // Me gusta / ya no: crea la «Favoritas» de `origin` si hace falta. Devuelve si quedó con me gusta.
+    bool toggleLike(const std::string& path, const std::string& origin);
+    std::int64_t create(const std::string& name, const std::string& origin);
     void rename(std::int64_t id, const std::string& name);
     void remove(std::int64_t id);
     // Agrega al final las que no estén ya en la lista.
