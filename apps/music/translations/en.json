@@ -69,7 +69,8 @@
           "library": "Library",
           "playback": "Playback",
           "lyrics": "Lyrics",
-          "covers": "Covers"
+          "covers": "Covers",
+          "equalizer": "Equalizer"
         },
         "scan-on-start": {
           "name": "Look for changes on start",
@@ -137,7 +138,15 @@
         },
         "move-up": "Higher priority",
         "move-down": "Lower priority",
-        "privacy": "Searches on the internet send only the artist, album and song name. Lyrics and covers stay saved on your computer."
+        "privacy": "Searches on the internet send only the artist, album and song name. Lyrics and covers stay saved on your computer.",
+        "equalizer": {
+          "name": "Equalizer",
+          "hint": "Adjust bass, mids and treble across 10 bands."
+        },
+        "eq-preset": {
+          "name": "Preset",
+          "hint": "Moving a band by hand switches to “Custom”."
+        }
       },
       "playlists": "Playlists",
       "favorites": "Favorites",
@@ -160,7 +169,70 @@
         "go-to-album": "Go to album",
         "add-to": "Add to «{name}»",
         "new-playlist": "New playlist with this song…",
-        "remove-from-playlist": "Remove from this playlist"
+        "remove-from-playlist": "Remove from this playlist",
+        "add-to-playlist": "Add to playlist",
+        "remove-from-queue": "Remove from queue",
+        "radio": "Start radio"
+      },
+      "servers": {
+        "title": "Servers",
+        "hint": "Stream from your own Jellyfin or Subsonic server (Navidrome, Gonic, Airsonic…). Its songs join your library; the music is not downloaded. Passwords and tokens are kept in the system keyring.",
+        "add": "Add server",
+        "sync": "Sync now",
+        "remove": "Remove server",
+        "subsonic": "Subsonic (Navidrome, Gonic…)",
+        "url": "Server address (https://…)",
+        "name": "Name (optional)",
+        "user": "User",
+        "password": "Password",
+        "connect": "Connect",
+        "connecting": "Connecting…",
+        "syncing": "syncing…",
+        "failed": "could not sync",
+        "missing": "Write the address and the user.",
+        "unreachable": "The server could not be reached. Check the address and your connection.",
+        "rejected": "The server rejected the login ({error})."
+      },
+      "eq": {
+        "flat": "Flat",
+        "bass": "Bass boost",
+        "treble": "Treble boost",
+        "vocal": "Vocal",
+        "rock": "Rock",
+        "pop": "Pop",
+        "electronic": "Electronic",
+        "custom": "Custom"
+      },
+      "fullscreen": "Fullscreen (F11)",
+      "exit-fullscreen": "Exit fullscreen (Esc)",
+      "source": {
+        "all": "All sources",
+        "local": "This computer"
+      },
+      "youtube": {
+        "connect": "Connect YouTube Music",
+        "hint": "The browser you pick opens with a new, isolated profile just to sign in to Google. You type your password there: Valandy never sees it. When you finish, the browser closes, the profile is deleted and only the session cookies are kept in the system keyring.",
+        "note": "YouTube Music has no public API: Valandy uses the one its website uses and plays through yt-dlp. It may stop working if YouTube changes it.",
+        "open": "Open browser",
+        "waiting": "Waiting for you to sign in in the browser…",
+        "closed": "The browser was closed before signing in.",
+        "timeout": "Signing in took too long. Try again.",
+        "launch": "Could not open {browser}.",
+        "no-browser": "No supported browser found (Zen, Firefox, LibreWolf, Chrome, Chromium, Brave or Vivaldi).",
+        "relogin": "Sign in again",
+        "results": "On YouTube Music",
+        "searching": "Searching…"
+      },
+      "for-you": {
+        "title": "For you",
+        "refresh": "Refresh recommendations",
+        "all": "See all",
+        "less": "See less",
+        "loading": "Loading your YouTube Music recommendations…",
+        "unavailable": "Could not load YouTube Music recommendations. Check the connection or sign in again in Settings.",
+        "connect": "Connect YouTube Music in Settings to get recommendations and mixes made for you.",
+        "recent": "Recently added",
+        "rediscover": "Rediscover"
       }
     }
   }

@@ -4,13 +4,21 @@
 #include "apps/music/lyrics.h"
 #include "apps/music/music_state.h"
 #include "apps/music/playlists.h"
+#include "apps/music/servers.h"
+#include "apps/music/youtube.h"
+#include "apps/music/recommendations.h"
 #include "core/deferred_call.h"
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <glib.h>
+#include <nlohmann/json.hpp>
+#include <openssl/evp.h>
+#include <sqlite3.h>
 #include <thread>
 #include <unistd.h>
 
@@ -171,12 +179,15 @@ namespace {
     state.folders = {"/m"};
     state.settings.crossfade = 6;
     state.settings.replayGain = ReplayGain::Album;
+    state.settings.equalizer = true;
+    state.settings.eqGains[0] = 6.0;
     state.settings.lyrics.move(2, -1); // internet antes que el .lrc
     state.settings.covers.enabled[static_cast<std::size_t>(Source::Online)] = false;
     assert(saveState(state, path));
     const MusicState loaded = loadState(path);
     assert(loaded.settings.crossfade == 6);
     assert(loaded.settings.replayGain == ReplayGain::Album);
+    assert(loaded.settings.equalizer && loaded.settings.eqGains[0] == 6.0 && loaded.settings.eqGains[1] == 0.0);
     assert(loaded.settings.lyrics.order[1] == Source::Online && loaded.settings.lyrics.order[2] == Source::Local);
     assert(!loaded.settings.covers.on(Source::Online) && loaded.settings.covers.on(Source::Embedded));
     // Un orden inválido (repetido) se ignora y queda el de fábrica.
@@ -213,6 +224,19 @@ namespace {
     }
   }
 
+  void testRemote() {
+    Server jf{.id = "ab12", .kind = ServerKind::Jellyfin};
+    Server sub{.id = "cd34", .kind = ServerKind::Subsonic};
+    assert(remotePrefix(jf) == "jf://ab12/" && remotePrefix(sub) == "sub://cd34/");
+    assert(isRemote("jf://ab12/x/y") && isRemote("sub://a/b/c") && !isRemote("/home/m/a.flac"));
+    RemoteRef ref;
+    assert(parseRemote("jf://ab12/album9/item7", ref) && ref.server == "ab12" && ref.album == "album9" && ref.item == "item7");
+    assert(parseRemote("sub://cd34/_/song1", ref) && ref.album == "_" && ref.item == "song1");
+    assert(!parseRemote("/home/a.flac", ref) && !parseRemote("jf://ab12/solo", ref));
+    assert(normalizeUrl("  music.example.com/ ") == "https://music.example.com");
+    assert(normalizeUrl("http://192.168.1.5:4533//") == "http://192.168.1.5:4533");
+  }
+
   void testShuffle() {
     const std::vector<std::string> items{"a", "b", "c", "d", "e"};
     const auto out = shuffledWithFirst(items, 3);
@@ -220,6 +244,176 @@ namespace {
     assert(std::is_permutation(out.begin(), out.end(), items.begin(), items.end()));
     assert(formatTime(65) == "1:05");
     assert(formatTime(3723) == "1:02:03");
+    // Ecualizador: plano = sin filtro; con ganancia, baja el volumen lo que más sube y omite las bandas en 0.
+    assert(equalizerFilter(kEqPresets[0].gains).empty());
+    EqGains gains{};
+    gains[0] = 6.0;
+    gains[9] = -20.0; // se limita a -12
+    assert(equalizerFilter(gains) == "lavfi=[volume=-6.0dB,equalizer=f=31:t=o:w=1:g=6.0,equalizer=f=16000:t=o:w=1:g=-12.0]");
+  }
+
+  void testColors() {
+    // Mitad roja y mitad casi negra: salen los dos, el rojo (vivo) primero; la transparencia no cuenta.
+    std::vector<std::uint8_t> rgba;
+    for (int i = 0; i < 100; ++i) {
+      const bool red = i < 50;
+      rgba.insert(rgba.end(), {static_cast<std::uint8_t>(red ? 220 : 10), 10, 10, 255});
+    }
+    rgba.insert(rgba.end(), {0, 255, 0, 0});
+    const auto colors = dominantColors(rgba, 5);
+    assert(colors.size() == 2);
+    assert(colors[0][0] > 0.8F && colors[1][0] < 0.1F);
+    assert(dominantColors({}, 5).empty());
+  }
+
+  void testYouTube() {
+    // Filas como las de InnerTube: búsqueda (artista • álbum • duración en una columna), «me gusta» (artista y
+    // álbum en columnas, duración fija) y un artista (sin videoId: no es canción). La miniatura sale grande.
+    const auto run = [](const std::string& text, const std::string& type = "", const std::string& id = "") {
+      nlohmann::json r{{"text", text}};
+      if (!type.empty()) {
+        r["navigationEndpoint"]["browseEndpoint"] = {
+            {"browseId", id},
+            {"browseEndpointContextSupportedConfigs", {{"browseEndpointContextMusicConfig", {{"pageType", type}}}}}};
+      }
+      return r;
+    };
+    const auto col = [](nlohmann::json runs) {
+      return nlohmann::json{{"musicResponsiveListItemFlexColumnRenderer", {{"text", {{"runs", std::move(runs)}}}}}};
+    };
+    const nlohmann::json response{{"contents", {
+        {{"musicResponsiveListItemRenderer", {
+            {"playlistItemData", {{"videoId", "217Bw85-5cw"}}},
+            {"thumbnail", {{"musicThumbnailRenderer", {{"thumbnail", {{"thumbnails", {{{"url", "https://x/a=w60-h60-l90-rj"}}, {{"url", "https://x/a=w120-h120-l90-rj"}}}}}}}}}},
+            {"flexColumns", {col({run("Adiós")}),
+                             col({run("Gustavo Cerati", "MUSIC_PAGE_TYPE_ARTIST", "UC1"), run(" • "),
+                                  run("Ahí Vamos", "MUSIC_PAGE_TYPE_ALBUM", "MPREb_1"), run(" • "), run("3:54")})}}}}},
+        {{"musicResponsiveListItemRenderer", {
+            {"flexColumns", {col({{{"text", "Afuera"}, {"navigationEndpoint", {{"watchEndpoint", {{"videoId", "abcdefghijk"}}}}}}}),
+                             col({run("Caifanes", "MUSIC_PAGE_TYPE_ARTIST", "UC2"), run(" & "), run("Saúl", "MUSIC_PAGE_TYPE_ARTIST", "UC3")}),
+                             col({run("El Nervio Del Volcán", "MUSIC_PAGE_TYPE_ALBUM", "MPREb_2")})}},
+            {"fixedColumns", {{{"musicResponsiveListItemFixedColumnRenderer", {{"text", {{"runs", {run("1:02:03")}}}}}}}}}}}},
+        {{"musicResponsiveListItemRenderer", {{"flexColumns", {col({run("Gustavo Cerati", "MUSIC_PAGE_TYPE_ARTIST", "UC1")})}}}}},
+        {{"continuationItemRenderer", {{"continuationEndpoint", {{"continuationCommand", {{"token", "TOKEN"}}}}}}}},
+    }}};
+    const auto tracks = parseYtTracks(response);
+    assert(tracks.size() == 2);
+    assert(tracks[0].videoId == "217Bw85-5cw" && tracks[0].title == "Adiós" && tracks[0].artist == "Gustavo Cerati");
+    assert(tracks[0].album == "Ahí Vamos" && tracks[0].albumId == "MPREb_1" && tracks[0].duration == 234.0);
+    assert(ytCoverSize(tracks[0].thumbnail, 544) == "https://x/a=w544-h544-l90-rj");
+    assert(tracks[1].videoId == "abcdefghijk" && tracks[1].artist == "Caifanes, Saúl" && tracks[1].duration == 3723.0);
+    assert(parseYtContinuation(response).token == "TOKEN" && parseYtContinuation(response).inBody);
+    assert(parseYtDuration("12 M reproducciones") == 0.0);
+
+    // Cookies: lectura, sesión iniciada, firma y formato para yt-dlp.
+    const std::string header = "VISITOR=v; SID=s; SAPISID=abc; __Secure-3PAPISID=def";
+    assert(cookieValue(header, "SAPISID") == "abc" && cookieValue(header, "SID") == "s" && cookieValue(header, "X").empty());
+    assert(hasYouTubeSession(header) && !hasYouTubeSession("VISITOR=v"));
+    gchar* sha = g_compute_checksum_for_string(G_CHECKSUM_SHA1, "1700000000 abc https://music.youtube.com", -1);
+    const std::string auth = sapisidAuthorization(header, 1700000000);
+    assert(auth.starts_with(std::string("SAPISIDHASH 1700000000_") + sha) && auth.contains(" SAPISID3PHASH 1700000000_"));
+    g_free(sha);
+    assert(netscapeCookies("A=1; B=x=y").contains("\tA\t1\n") && netscapeCookies("A=1; B=x=y").contains("\tB\tx=y\n"));
+
+    // Perfil de Firefox simulado: solo las de youtube.com, sin repetir (gana el dominio general).
+    const fs::path profile = fs::temp_directory_path() / ("okaru-music-ff-" + std::to_string(::getpid()));
+    fs::create_directories(profile / "Default");
+    sqlite3* db = nullptr;
+    sqlite3_open((profile / "cookies.sqlite").c_str(), &db);
+    sqlite3_exec(db, "CREATE TABLE moz_cookies(host TEXT, name TEXT, value TEXT);"
+                     "INSERT INTO moz_cookies VALUES('.youtube.com','SID','s'),('music.youtube.com','SID','other'),"
+                     "('.google.com','SAPISID','g'),('.youtube.com','SAPISID','y');", nullptr, nullptr, nullptr);
+    sqlite3_close(db);
+    assert(readFirefoxCookies(profile) == "SID=s; SAPISID=y");
+
+    // Chromium con --password-store=basic: AES-128-CBC con la clave de «peanuts», prefijo v10 y (versión ≥ 24) el
+    // SHA-256 del dominio delante del valor.
+    unsigned char key[16];
+    PKCS5_PBKDF2_HMAC_SHA1("peanuts", 7, reinterpret_cast<const unsigned char*>("saltysalt"), 9, 1, 16, key);
+    unsigned char iv[16];
+    std::fill(std::begin(iv), std::end(iv), ' ');
+    const std::string plain = std::string(32, 'h') + "secret-sid";
+    std::string cipher(plain.size() + 16, '\0');
+    int n1 = 0, n2 = 0;
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), nullptr, key, iv);
+    EVP_EncryptUpdate(ctx, reinterpret_cast<unsigned char*>(cipher.data()), &n1, reinterpret_cast<const unsigned char*>(plain.data()), static_cast<int>(plain.size()));
+    EVP_EncryptFinal_ex(ctx, reinterpret_cast<unsigned char*>(cipher.data()) + n1, &n2);
+    EVP_CIPHER_CTX_free(ctx);
+    cipher.resize(static_cast<std::size_t>(n1 + n2));
+    const std::string blob = "v10" + cipher;
+    sqlite3_open((profile / "Default" / "Cookies").c_str(), &db);
+    sqlite3_exec(db, "CREATE TABLE meta(key TEXT, value TEXT); INSERT INTO meta VALUES('version','24');"
+                     "CREATE TABLE cookies(host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB);", nullptr, nullptr, nullptr);
+    sqlite3_stmt* stmt = nullptr;
+    sqlite3_prepare_v2(db, "INSERT INTO cookies VALUES('.youtube.com','SID','',?)", -1, &stmt, nullptr);
+    sqlite3_bind_blob(stmt, 1, blob.data(), static_cast<int>(blob.size()), SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    assert(readChromiumCookies(profile) == "SID=secret-sid");
+    fs::remove_all(profile);
+  }
+
+  void testRecommendations() {
+    // Radio ("next"): título, artista enlazado, álbum, duración; sin repetir.
+    const auto link = [](const std::string& text, const std::string& type, const std::string& id) {
+      return nlohmann::json{{"text", text}, {"navigationEndpoint", {{"browseEndpoint", {{"browseId", id},
+          {"browseEndpointContextSupportedConfigs", {{"browseEndpointContextMusicConfig", {{"pageType", type}}}}}}}}}};
+    };
+    const nlohmann::json item{{"playlistPanelVideoRenderer", {
+        {"videoId", "YVXNPPdh6wE"}, {"title", {{"runs", {{{"text", "Crimen"}}}}}},
+        {"longBylineText", {{"runs", {link("Gustavo Cerati", "MUSIC_PAGE_TYPE_ARTIST", "UC1"), {{"text", " • "}},
+                                      link("Ahí Vamos", "MUSIC_PAGE_TYPE_ALBUM", "MPREb_1"), {{"text", " • "}}, {{"text", "2006"}}}}}},
+        {"lengthText", {{"runs", {{{"text", "3:53"}}}}}}}}};
+    const auto radio = parseYtPanel(nlohmann::json{{"items", {item, item}}});
+    assert(radio.size() == 1 && radio[0].title == "Crimen" && radio[0].artist == "Gustavo Cerati");
+    assert(radio[0].album == "Ahí Vamos" && radio[0].duration == 233.0);
+    assert(isVideoId("YVXNPPdh6wE") && !isVideoId("x; rm -rf /") && !isVideoId("short"));
+    // Con sesión, cada canción trae su «counterpart» (el video): no se repite. Y un videoclip suelto se salta.
+    nlohmann::json video = item;
+    video["playlistPanelVideoRenderer"]["videoId"] = "VIDEOxxxxx1";
+    video["playlistPanelVideoRenderer"]["navigationEndpoint"]["watchEndpoint"]["watchEndpointMusicSupportedConfigs"]
+         ["watchEndpointMusicConfig"]["musicVideoType"] = "MUSIC_VIDEO_TYPE_OMV";
+    const nlohmann::json wrapped{{"playlistPanelVideoWrapperRenderer", {{"primaryRenderer", item}, {"counterpart", {{{"counterpartRenderer", video}}}}}}};
+    const auto deduped = parseYtPanel(nlohmann::json{{"items", {wrapped, video}}});
+    assert(deduped.size() == 1 && deduped[0].videoId == "YVXNPPdh6wE");
+
+    // Portada: canción, álbum y lista; los artistas (ni canción ni lista) se saltan.
+    const auto two = [](const std::string& title, nlohmann::json nav) {
+      return nlohmann::json{{"musicTwoRowItemRenderer", {{"title", {{"runs", {{{"text", title}}}}}},
+          {"subtitle", {{"runs", {{{"text", "Canción"}}, {{"text", " • "}}, {{"text", "Artista"}}}}}}, {"navigationEndpoint", std::move(nav)}}}};
+    };
+    const auto browse = [](const std::string& id, const std::string& type) {
+      return nlohmann::json{{"browseEndpoint", {{"browseId", id},
+          {"browseEndpointContextSupportedConfigs", {{"browseEndpointContextMusicConfig", {{"pageType", type}}}}}}}};
+    };
+    const nlohmann::json home{{"contents", {{{"musicCarouselShelfRenderer", {
+        {"header", {{"musicCarouselShelfBasicHeaderRenderer", {{"title", {{"runs", {{{"text", "Vuelve a escucharlo"}}}}}}}}}},
+        {"contents", {two("Adiós", {{"watchEndpoint", {{"videoId", "217Bw85-5cw"}}}}),
+                      two("Ahí Vamos", browse("MPREb_1", "MUSIC_PAGE_TYPE_ALBUM")),
+                      two("Mi supermix", browse("VLRDTMAK5", "MUSIC_PAGE_TYPE_PLAYLIST")),
+                      two("Cerati", browse("UC1", "MUSIC_PAGE_TYPE_ARTIST"))}}}}}}}};
+    const auto shelves = parseYtHome(home);
+    assert(shelves.size() == 1 && shelves[0].title == "Vuelve a escucharlo" && shelves[0].cards.size() == 3);
+    assert(shelves[0].cards[0].kind == YtCard::Kind::Song && shelves[0].cards[0].videoId == "217Bw85-5cw");
+    assert(shelves[0].cards[0].subtitle == "Canción • Artista");
+    assert(shelves[0].cards[0].artist == "Artista"); // sin enlace: lo último del subtítulo
+    assert(shelves[0].cards[1].kind == YtCard::Kind::Album && shelves[0].cards[2].kind == YtCard::Kind::Playlist);
+
+    // Biblioteca: recientes por fecha del archivo (los de servidores no cuentan); redescubre estable por día.
+    Model model;
+    for (int i = 0; i < 4; ++i) {
+      Track t;
+      t.path = i < 3 ? "/m/" + std::to_string(i) : "yt://s/_/abcdefghijk";
+      t.album = "A" + std::to_string(i);
+      t.mtime = i < 3 ? 100 + i : 0;
+      model.tracks.push_back(t);
+      model.albums.push_back({.title = t.album, .tracks = {static_cast<std::size_t>(i)}});
+    }
+    assert((recentAlbums(model, 2) == std::vector<std::size_t>{2, 1}));
+    assert(recentAlbums(model, 10).size() == 3);
+    assert(rediscoverAlbums(model, 3, 7) == rediscoverAlbums(model, 3, 7) && rediscoverAlbums(model, 10, 1).size() == 4);
   }
 
   void testScan() {
@@ -263,6 +457,18 @@ namespace {
     fs::remove(root / "music" / "album" / "two.wav");
     assert(runScan({root / "music"}).tracks.size() == 1);
     assert(runScan({root / "music", root / "unmounted"}).tracks.size() == 1);
+    // Las de un servidor no son de las carpetas: el escaneo local no las toca; su sincronización las reemplaza.
+    Track remote;
+    remote.path = "jf://ab12/al1/it1";
+    remote.title = "Remota";
+    library.replaceRemote("jf://ab12/", {remote});
+    assert(runScan({root / "music"}).tracks.size() == 2);
+    remote.path = "jf://ab12/al1/it2";
+    library.replaceRemote("jf://ab12/", {remote});
+    const Model synced = library.load();
+    assert(synced.tracks.size() == 2);
+    assert(std::ranges::any_of(synced.tracks, [](const Track& t) { return t.path == "jf://ab12/al1/it2"; }));
+    library.replaceRemote("jf://ab12/", {});
     // Sin la carpeta en la lista, sus canciones salen de la biblioteca.
     assert(runScan({}).tracks.empty());
     fs::remove_all(root);
@@ -277,7 +483,11 @@ int main() {
   testLyrics();
   testSettings();
   testPlaylists();
+  testRemote();
   testShuffle();
+  testColors();
+  testYouTube();
+  testRecommendations();
   testScan();
   return 0;
 }

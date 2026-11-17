@@ -14,8 +14,8 @@ int main() {
       .titleKey = "apps.music.title",
       .width = 1180.0F,
       .height = 760.0F,
-      .minWidth = 760.0F,
-      .minHeight = 480.0F,
+      .minWidth = 300.0F,
+      .minHeight = 140.0F,
   });
   okaru::music::MusicWindow window(app);
   return app.run();

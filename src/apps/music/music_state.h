@@ -4,6 +4,7 @@
 // aleatorio, repetir, el orden de cada vista y la cola con la canción en la que quedó.
 
 #include "apps/music/audio_player.h"
+#include "apps/music/servers.h"
 
 #include <array>
 #include <cstdint>
@@ -33,6 +34,8 @@ namespace okaru::music {
     int crossfade = 0; // segundos de fundido entre canciones; 0 = sin fundido
     bool gapless = true;
     ReplayGain replayGain = ReplayGain::Off;
+    bool equalizer = false;
+    EqGains eqGains{};
     bool resume = true;      // al abrir, la cola donde quedó
     bool scanOnStart = true; // al abrir, buscar cambios en las carpetas
     SourceOrder lyrics;
@@ -51,6 +54,9 @@ namespace okaru::music {
     std::array<std::uint8_t, 4> sort{};
     std::array<bool, 4> reverse{};
     Settings settings;
+    std::vector<Server> servers; // sin secretos: esos van al llavero
+    std::string deviceId;        // identifica esta instalación ante Jellyfin
+    std::string source;          // origen que se explora: "" todos, "local" este equipo, o el id de un servidor
   };
 
   [[nodiscard]] std::filesystem::path statePath();

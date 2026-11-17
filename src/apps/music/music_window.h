@@ -13,6 +13,8 @@
 #include "apps/music/music_state.h"
 #include "apps/music/online.h"
 #include "apps/music/playlists.h"
+#include "apps/music/servers.h"
+#include "apps/music/youtube.h"
 #include "ui/controls/scroll_view.h"
 
 #include <chrono>
@@ -26,6 +28,8 @@
 
 class AnimationManager;
 class Button;
+class Image;
+class Flex;
 class ScrollView;
 class Input;
 class Label;
@@ -43,11 +47,12 @@ namespace okaru::music {
 
   class CoverImage;
   class LyricsBlock;
+  class WaveSeekBar;
   class TrackListAdapter;
   class AlbumGridAdapter;
   class NameListAdapter;
 
-  enum class View : std::uint8_t { Albums, Artists, Songs, Genres, Settings, Playlist };
+  enum class View : std::uint8_t { Albums, Artists, Songs, Genres, Settings, Playlist, ForYou };
   // Pestañas del reproductor a pantalla completa.
   enum class PlayerTab : std::uint8_t { Queue, Lyrics };
 
@@ -68,6 +73,14 @@ namespace okaru::music {
     [[nodiscard]] std::unique_ptr<Node> buildSidebar(float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildContent(float width, float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildNowPlaying(float width, float scale);
+    // Miniventana: con la ventana pequeña (flotante), solo carátula, canción y controles.
+    [[nodiscard]] std::unique_ptr<Node> buildMini(float width, float height, float scale);
+    // Pantalla completa (estilo Spotify): fondo con la carátula, la canción grande abajo y los controles.
+    [[nodiscard]] std::unique_ptr<Node> buildFullscreen(float width, float height, float scale);
+    void setFullscreen(bool fullscreen);
+    // Fondo de lava de la pantalla completa: manchas suaves con los colores de la carátula, moviéndose despacio.
+    void applyLavaColors(const std::string& cover);
+    void stepFrame(); // lava y barra ondulada, en cada cuadro
     [[nodiscard]] std::unique_ptr<Node> buildFullPlayer(float width, float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildQueuePanel(float width, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildLyricsPanel(float width, float scale);
@@ -84,6 +97,38 @@ namespace okaru::music {
     [[nodiscard]] double estimatedPosition() const;
     // Carátulas que faltan, de internet (si está activo), una a una.
     void fetchMissingCovers();
+    void applyCover(const std::vector<std::string>& paths, const std::string& cover);
+    // Servidores: sincronizar su catálogo, quitar uno, y el formulario para agregar.
+    void syncServers();
+    void syncServer(const std::string& id);
+    void removeServer(const std::string& id);
+    void submitServer();
+    [[nodiscard]] std::unique_ptr<Node> buildServerForm(Flex& card, float width, float scale);
+    // YouTube Music: inicio de sesión con un perfil aislado del navegador elegido.
+    [[nodiscard]] std::unique_ptr<Node> buildYouTubeForm(Flex& card, float width, float scale);
+    void startYouTubeLogin();
+    // Origen que se explora (ver MusicState::source).
+    void setSource(std::string source);
+    [[nodiscard]] bool inSource(const std::string& path) const;
+    [[nodiscard]] const Server* sourceServer() const;
+    // Búsqueda en el catálogo de YouTube Music (con el origen en YouTube Music).
+    void searchYouTube();
+    [[nodiscard]] std::unique_ptr<Node> buildItemTracks(std::vector<std::string> items, float scale);
+    // Carátula de una canción que suena y no está en la biblioteca (resultado de YouTube Music).
+    void fetchExtraCover(const std::string& item);
+    // Recomendaciones («Para ti»): portada de YouTube Music y estantes de la biblioteca.
+    [[nodiscard]] std::unique_ptr<Node> buildForYou(float width, float height, float scale);
+    void loadHome(bool force);
+    void playCard(const YtCard& card, const std::string& key);
+    // Radio de una canción (de YouTube Music, o buscada ahí por título y artista).
+    void startRadio(const std::string& path);
+    // Reproduce canciones que pueden no estar en la biblioteca (las recuerda para mostrarlas).
+    void playExtra(std::vector<Track> tracks, std::size_t start);
+    [[nodiscard]] const Server* youTubeServer() const;
+    // Carátula de una tarjeta: la ruta en la caché, o vacía mientras se descarga.
+    [[nodiscard]] std::string cardCover(const std::string& url);
+    // Resuelve por adelantado las próximas canciones de YouTube Music de la cola.
+    void prefetchUpcoming();
     [[nodiscard]] std::unique_ptr<Node> buildEmpty(float width, float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildTracks(std::vector<std::size_t> tracks, bool numbers, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildAlbums(std::vector<std::size_t> albums, float scale);
@@ -104,16 +149,22 @@ namespace okaru::music {
       std::function<void()> action;
       bool separator = false;
     };
-    void openSongMenu(std::vector<std::string> paths, float x, float y, std::int64_t playlist = 0, std::size_t index = 0);
+    // `playlist`/`index`: la fila es de esa lista; `queueIndex`: la fila es de la cola (se puede quitar de ella).
+    void openSongMenu(
+        std::vector<std::string> paths, float x, float y, std::int64_t playlist = 0, std::size_t index = 0,
+        std::int64_t queueIndex = -1
+    );
     [[nodiscard]] std::unique_ptr<Node> buildMenu(float width, float height, float scale);
     // Diálogo con un nombre (nueva lista o renombrar).
-    enum class Dialog : std::uint8_t { None, NewPlaylist, RenamePlaylist };
+    enum class Dialog : std::uint8_t { None, NewPlaylist, RenamePlaylist, AddServer, YouTubeLogin };
     void openDialog(Dialog dialog, std::vector<std::string> paths = {});
     void submitDialog();
     [[nodiscard]] std::unique_ptr<Node> buildDialog(float width, float height, float scale);
     [[nodiscard]] std::string playlistName(const Playlist& list) const;
     void openPlaylist(std::int64_t id);
     void toggleLike(const std::string& path);
+    // Menú «agregar a una lista» de la canción que suena, sobre su botón.
+    void openAddToPlaylist();
 
     void setModel(Model model);
     void rescan();
@@ -152,11 +203,52 @@ namespace okaru::music {
     Input* m_dialogInput = nullptr;
     std::string m_titleFont; // familia de la fuente de firma del nombre (vacía si no cargó)
     Button* m_likeButton = nullptr;
+    std::unique_ptr<RemoteSources> m_remote;
+    enum class ServerStatus : std::uint8_t { Idle, Syncing, Ready, Failed };
+    std::unordered_map<std::string, ServerStatus> m_serverStatus;
+    std::unordered_map<std::string, std::size_t> m_serverCount;
+    struct ServerForm {
+      ServerKind kind = ServerKind::Jellyfin;
+      std::string name;
+      std::string url;
+      std::string user;
+      std::string password;
+      std::string error;
+      bool busy = false;
+    };
+    ServerForm m_serverForm;
+    struct YouTubeForm {
+      std::vector<Browser> browsers;
+      std::size_t browser = 0;
+      bool waiting = false;
+      std::string error;
+    };
+    YouTubeForm m_ytForm;
+    YouTubeLogin m_ytLogin;
+    Timer m_ytSearchTimer;
+    std::string m_ytQuery;                // búsqueda cuyos resultados se muestran
+    std::vector<std::string> m_ytResults; // sus rutas ("yt://…")
+    bool m_ytSearching = false;
+    Button* m_addToButton = nullptr;
+    bool m_menuAbove = false; // el menú se abre hacia arriba (desde la barra de abajo)
     Model m_model;
     MusicState m_state;
     AudioPlayer m_player;
     std::unique_ptr<apps::PortalFileChooser> m_chooser;
     std::unordered_map<std::string, std::size_t> m_byPath; // ruta → índice en m_model.tracks
+    // Toda la biblioteca, aunque se explore un solo origen: la cola, la canción actual y las listas ven todo.
+    std::vector<Track> m_all;
+    std::unordered_map<std::string, std::size_t> m_allByPath;
+    std::unordered_map<std::string, Track> m_extraTracks; // resultados de YouTube Music fuera de la biblioteca
+    std::unordered_set<std::string> m_extraCovers;         // carátulas de esos resultados ya pedidas
+    std::unique_ptr<StreamResolver> m_streams;
+    std::vector<YtShelf> m_home;
+    bool m_homeLoading = false;
+    bool m_homeLoaded = false;
+    std::unordered_set<std::string> m_homeExpanded;               // estantes con «ver todo»
+    std::unordered_map<std::string, std::string> m_cardCovers;    // URL → carátula en la caché
+    std::unordered_set<std::string> m_cardCoversPending;
+    std::string m_cardLoading; // tarjeta que se está abriendo (muestra la ruedita)
 
     View m_view = View::Albums;
     Detail m_detail;
@@ -185,6 +277,14 @@ namespace okaru::music {
     float m_lyricAnchor = -1.0F; // foco de atenuación de la letra (se desliza entre líneas)
     double m_stalePosition = -1.0; // posición de la canción anterior, hasta que llegue la de la nueva     // etiqueta que vuelve a su tamaño en la transición en curso
     Timer m_lyricsTick;
+    Timer m_frameTick;
+    std::vector<Image*> m_lavaBlobs;
+    WaveSeekBar* m_wave = nullptr;
+    std::chrono::steady_clock::time_point m_lavaLast = std::chrono::steady_clock::now();
+    std::string m_lavaCover;
+    float m_lavaWidth = 0.0F;
+    float m_lavaHeight = 0.0F;
+    std::chrono::steady_clock::time_point m_lavaStart = std::chrono::steady_clock::now();
     double m_lastPosition = -1.0;
     std::chrono::steady_clock::time_point m_positionAt;
     float m_fullY = 0.0F;
@@ -211,6 +311,7 @@ namespace okaru::music {
     VirtualListView* m_queueList = nullptr;
     Input* m_search = nullptr;
     CoverImage* m_nowCover = nullptr;
+    CoverImage* m_miniBackground = nullptr;
     Label* m_nowTitle = nullptr;
     Label* m_nowArtist = nullptr;
     Button* m_playButton = nullptr;
@@ -233,6 +334,7 @@ namespace okaru::music {
     std::unordered_set<std::string> m_coversFetching;
     Timer m_coverRebuild;
     Label* m_crossfadeLabel = nullptr;
+    std::array<Label*, kEqBands.size()> m_eqLabels{};
 
     std::unique_ptr<MprisServer> m_mpris; // último: se va antes que m_player
   };

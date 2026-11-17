@@ -7,7 +7,7 @@ project('okaru-music', 'cpp',
 
 # El núcleo y sus bibliotecas son privados (/usr/lib/okaru): se enlazan con su ruta en el binario.
 _okaru_libdir = get_option('prefix') / get_option('libdir') / 'okaru'
-_deps = [dependency('okaru-core'), dependency('mpv'), dependency('taglib'), dependency('sqlite3'), dependency('glib-2.0')]
+_deps = [dependency('okaru-core'), dependency('mpv'), dependency('taglib'), dependency('sqlite3'), dependency('glib-2.0'), dependency('libsecret-1'), dependency('libcrypto'), dependency('nlohmann_json')]
 _inc = include_directories('src')
 _args = ['-Wall', '-Wextra', '-Wno-missing-field-initializers', '-Wpedantic', '-Wconversion', '-Wshadow']
 _library = files('src/apps/music/library.cpp')
@@ -19,6 +19,9 @@ executable('okaru-music',
     'src/apps/music/lyrics.cpp',
     'src/apps/music/online.cpp',
     'src/apps/music/playlists.cpp',
+    'src/apps/music/servers.cpp',
+    'src/apps/music/youtube.cpp',
+    'src/apps/music/recommendations.cpp',
     'src/apps/music/mpris_server.cpp',
     'src/apps/music/music_state.cpp',
     'src/apps/music/music_window.cpp',
@@ -38,7 +41,7 @@ install_data('assets/dev.okaru.Music.desktop', install_dir: get_option('datadir'
 
 if get_option('tests').allowed()
   test('okaru_music_library', executable('okaru_music_library_test',
-    sources: files('tests/okaru_music_library_test.cpp', 'src/apps/music/audio_player.cpp', 'src/apps/music/lyrics.cpp', 'src/apps/music/music_state.cpp', 'src/apps/music/playlists.cpp') + _library,
+    sources: files('tests/okaru_music_library_test.cpp', 'src/apps/music/audio_player.cpp', 'src/apps/music/lyrics.cpp', 'src/apps/music/music_state.cpp', 'src/apps/music/playlists.cpp', 'src/apps/music/servers.cpp', 'src/apps/music/youtube.cpp', 'src/apps/music/recommendations.cpp') + _library,
     include_directories: _inc,
     dependencies: _deps,
     cpp_args: _args,

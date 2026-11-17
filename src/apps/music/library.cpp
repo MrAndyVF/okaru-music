@@ -625,6 +625,48 @@ namespace okaru::music {
     fs::remove_all(m_coversDir, ec);
   }
 
+  void Library::replaceRemote(const std::string& prefix, const std::vector<Track>& tracks) {
+    Db db;
+    if (!openDb(db, m_dbPath)) {
+      return;
+    }
+    db.exec("BEGIN");
+    {
+      // Las carátulas ya descargadas se conservan (misma ruta → misma carátula).
+      std::unordered_map<std::string, std::string> covers;
+      Statement select(db.handle, "SELECT path, cover FROM tracks WHERE path LIKE ?1 || '%'");
+      select.bind(1, prefix);
+      while (sqlite3_step(select.handle) == SQLITE_ROW) {
+        covers.emplace(select.text(0), select.text(1));
+      }
+      Statement remove(db.handle, "DELETE FROM tracks WHERE path LIKE ?1 || '%'");
+      remove.bind(1, prefix);
+      sqlite3_step(remove.handle);
+      Statement insert(
+          db.handle,
+          "INSERT OR REPLACE INTO tracks (path, title, artist, album_artist, album, genre, lyrics, cover, year, disc,"
+          " number, duration, mtime, size) VALUES (?1,?2,?3,?4,?5,?6,'',?7,?8,?9,?10,?11,0,0)"
+      );
+      for (const Track& t : tracks) {
+        sqlite3_reset(insert.handle);
+        insert.bind(1, t.path);
+        insert.bind(2, t.title);
+        insert.bind(3, t.artist);
+        insert.bind(4, t.albumArtist);
+        insert.bind(5, t.album);
+        insert.bind(6, t.genre);
+        const auto cover = covers.find(t.path);
+        insert.bind(7, cover != covers.end() ? cover->second : t.cover);
+        sqlite3_bind_int(insert.handle, 8, t.year);
+        sqlite3_bind_int(insert.handle, 9, t.disc);
+        sqlite3_bind_int(insert.handle, 10, t.number);
+        sqlite3_bind_double(insert.handle, 11, t.duration);
+        sqlite3_step(insert.handle);
+      }
+    }
+    db.exec("COMMIT");
+  }
+
   void Library::setCover(const std::vector<std::string>& paths, const std::string& cover) {
     Db db;
     if (!openDb(db, m_dbPath)) {
@@ -659,7 +701,10 @@ namespace okaru::music {
     }
     std::unordered_map<std::string, std::pair<std::int64_t, std::int64_t>> known; // ruta → (mtime, tamaño)
     for (auto& t : readAll(db.handle)) {
-      known.emplace(std::move(t.path), std::pair{t.mtime, t.size});
+      // Las de los servidores no son de las carpetas: las maneja su sincronización.
+      if (t.path.starts_with('/')) {
+        known.emplace(std::move(t.path), std::pair{t.mtime, t.size});
+      }
     }
 
     Statement upsert(
@@ -755,6 +800,45 @@ namespace okaru::music {
     db.exec("COMMIT");
     kLog.info("scan: {} files, {} read", counts.scanned, counts.updated);
     finish(organize(readAll(db.handle)));
+  }
+
+  std::vector<Rgb> dominantColors(const std::vector<std::uint8_t>& rgba, std::size_t count) {
+    // Histograma de 8×8×8 cajas; los colores vivos pesan más que los grises, que suelen ser fondo.
+    struct Bin {
+      double r = 0, g = 0, b = 0, weight = 0;
+      std::size_t pixels = 0;
+    };
+    std::array<Bin, 512> bins{};
+    for (std::size_t i = 0; i + 3 < rgba.size(); i += 4) {
+      if (rgba[i + 3] < 128) {
+        continue;
+      }
+      const int r = rgba[i], g = rgba[i + 1], b = rgba[i + 2];
+      const double saturation = (std::max({r, g, b}) - std::min({r, g, b})) / 255.0;
+      Bin& bin = bins[static_cast<std::size_t>(((r >> 5) << 6) | ((g >> 5) << 3) | (b >> 5))];
+      bin.r += r;
+      bin.g += g;
+      bin.b += b;
+      bin.weight += 1.0 + saturation * 3.0;
+      ++bin.pixels;
+    }
+    std::ranges::sort(bins, std::greater{}, &Bin::weight);
+    std::vector<Rgb> out;
+    for (const Bin& bin : bins) {
+      if (bin.pixels == 0 || out.size() >= count) {
+        break;
+      }
+      const auto n = static_cast<double>(bin.pixels) * 255.0;
+      const Rgb color{static_cast<float>(bin.r / n), static_cast<float>(bin.g / n), static_cast<float>(bin.b / n)};
+      const bool distinct = std::ranges::none_of(out, [&](const Rgb& other) {
+        const float dr = color[0] - other[0], dg = color[1] - other[1], db = color[2] - other[2];
+        return dr * dr + dg * dg + db * db < 0.15F * 0.15F;
+      });
+      if (distinct) {
+        out.push_back(color);
+      }
+    }
+    return out;
   }
 
 } // namespace okaru::music

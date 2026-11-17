@@ -99,12 +99,39 @@ namespace okaru::music {
       out.gapless = (*settings)["gapless"].value_or(true);
       const auto gain = (*settings)["replaygain"].value_or<std::int64_t>(0);
       out.replayGain = gain == 1 ? ReplayGain::Track : gain == 2 ? ReplayGain::Album : ReplayGain::Off;
+      out.equalizer = (*settings)["equalizer"].value_or(false);
+      if (const auto* gains = (*settings)["eq_gains"].as_array()) {
+        for (std::size_t i = 0; i < out.eqGains.size() && i < gains->size(); ++i) {
+          out.eqGains[i] = std::clamp((*gains)[i].value_or(0.0), -kEqMaxGain, kEqMaxGain);
+        }
+      }
       out.resume = (*settings)["resume"].value_or(true);
       out.scanOnStart = (*settings)["scan_on_start"].value_or(true);
       out.preferSynced = (*settings)["prefer_synced"].value_or(true);
       readSources((*settings)["lyrics"].as_table(), out.lyrics);
       readSources((*settings)["covers"].as_table(), out.covers);
     }
+    if (const auto* servers = root["servers"].as_array()) {
+      for (const auto& node : *servers) {
+        const auto* table = node.as_table();
+        if (table == nullptr) {
+          continue;
+        }
+        Server server;
+        server.id = (*table)["id"].value_or("");
+        const std::string kind = (*table)["kind"].value_or(std::string());
+        server.kind = kind == "subsonic" ? ServerKind::Subsonic : kind == "youtube" ? ServerKind::YouTube : ServerKind::Jellyfin;
+        server.name = (*table)["name"].value_or("");
+        server.url = (*table)["url"].value_or("");
+        server.user = (*table)["user"].value_or("");
+        server.userId = (*table)["user_id"].value_or("");
+        if (!server.id.empty() && !server.url.empty()) {
+          state.servers.push_back(std::move(server));
+        }
+      }
+    }
+    state.deviceId = root["device_id"].value_or("");
+    state.source = root["source"].value_or("");
     if (const auto* queue = root["queue"].as_array()) {
       for (const auto& node : *queue) {
         if (const auto item = node.value<std::string>()) {
@@ -128,11 +155,26 @@ namespace okaru::music {
     for (const auto& item : state.queue) {
       queue.push_back(item);
     }
+    toml::array servers;
+    for (const Server& server : state.servers) {
+      servers.push_back(toml::table{
+          {"id", server.id},
+          {"kind", server.kind == ServerKind::Subsonic ? "subsonic" : server.kind == ServerKind::YouTube ? "youtube" : "jellyfin"},
+          {"name", server.name},
+          {"url", server.url},
+          {"user", server.user},
+          {"user_id", server.userId},
+      });
+    }
     toml::array sort;
     toml::array reverse;
     for (std::size_t i = 0; i < state.sort.size(); ++i) {
       sort.push_back(static_cast<std::int64_t>(state.sort[i]));
       reverse.push_back(state.reverse[i]);
+    }
+    toml::array eqGains;
+    for (const double gain : state.settings.eqGains) {
+      eqGains.push_back(gain);
     }
     const toml::table root{
         {"folders", std::move(folders)},
@@ -143,11 +185,16 @@ namespace okaru::music {
         {"current", static_cast<std::int64_t>(state.current)},
         {"sort", std::move(sort)},
         {"reverse", std::move(reverse)},
+        {"servers", std::move(servers)},
+        {"device_id", state.deviceId},
+        {"source", state.source},
         {"settings",
          toml::table{
              {"crossfade", state.settings.crossfade},
              {"gapless", state.settings.gapless},
              {"replaygain", static_cast<std::int64_t>(state.settings.replayGain)},
+             {"equalizer", state.settings.equalizer},
+             {"eq_gains", eqGains},
              {"resume", state.settings.resume},
              {"scan_on_start", state.settings.scanOnStart},
              {"prefer_synced", state.settings.preferSynced},

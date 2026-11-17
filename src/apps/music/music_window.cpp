@@ -1,7 +1,14 @@
 #include "apps/music/music_window.h"
 
+#include "apps/music/recommendations.h"
+
 #include "apps/common/okaru_app.h"
 #include "apps/common/portal_file_chooser.h"
+#include "render/core/image_file_loader.h"
+#include "render/core/texture_manager.h"
+#include "render/scene/input_area.h"
+#include "render/scene/rect_node.h"
+#include "ui/controls/image.h"
 #include "core/deferred_call.h"
 #include "core/files/resource_paths.h"
 #include "core/input/key_modifiers.h"
@@ -20,6 +27,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <numbers>
 #include <glib.h>
 #include <linux/input-event-codes.h>
 
@@ -40,6 +48,8 @@ namespace okaru::music {
     constexpr float kVolumeSliderFrom = 760.0F;   // desde este ancho se ve la barra de volumen
     constexpr float kSongInfoFrom = 620.0F;       // desde este ancho, título y artista junto a la carátula de abajo
     constexpr float kNowPlayingHeight = 88.0F;
+    constexpr float kMiniBelowWidth = 560.0F;  // bajo este ancho (o el alto de abajo) la ventana es la miniventana
+    constexpr float kMiniBelowHeight = 360.0F;
     constexpr float kRowHeight = 52.0F;
     constexpr float kAlbumMinWidth = 168.0F;
     constexpr float kAlbumTextHeight = 48.0F;
@@ -476,6 +486,156 @@ namespace okaru::music {
   // otra. Las animaciones solo mueven, escalan y funden con medidas ya tomadas (place(), sin maquetar ni redibujar
   // texto) y piden un cuadro nuevo en cada paso: así el movimiento es continuo. Como en Kopuz, las líneas se
   // atenúan con la distancia a la que suena, y ese foco también se desplaza de forma continua.
+  // ── Barra de tiempo ondulada (Material 3 Expressive) ──────────────────────────────────────────────
+  // Lo reproducido es una onda que avanza mientras suena (una textura desplazada dentro de un recorte del ancho
+  // reproducido) y se aplana al pausar; luego un hueco, el indicador en píldora, otro hueco y la pista restante.
+  // Se mueve en cada cuadro con la posición estimada: avanza continuo, sin esperar los avisos de mpv.
+  class WaveSeekBar final : public Node {
+  public:
+    using SeekFn = std::function<void(double fraction)>;
+
+    WaveSeekBar(Renderer& renderer, float width, float scale, float bufferScale, SeekFn seek)
+        : m_scale(scale), m_seek(std::move(seek)) {
+      const float s = scale;
+      m_wavelength = 40.0F * s;
+      const float thickness = 4.0F * s;
+      const float amplitude = 3.5F * s;
+      setSize(width, kHeight * s);
+      const float cy = height() * 0.5F;
+      const Color primary = colorForRole(ColorRole::Primary);
+      const auto style = [&](const Color& color, float radius) {
+        return RoundedRectStyle{.fill = color, .border = color, .radius = radius};
+      };
+
+      m_track = static_cast<RectNode*>(addChild(std::make_unique<RectNode>()));
+      m_track->setStyle(style(colorForRole(ColorRole::Primary, 0.4F), thickness * 0.5F)); // pista inactiva: el color principal, tenue
+      m_track->setSize(0.0F, thickness);
+      m_track->setPosition(0.0F, cy - thickness * 0.5F);
+
+      m_clip = addChild(std::make_unique<Node>());
+      m_clip->setClipChildren(true);
+      m_clip->setSize(0.0F, height());
+      m_flat = static_cast<RectNode*>(m_clip->addChild(std::make_unique<RectNode>()));
+      m_flat->setStyle(style(primary, thickness * 0.5F));
+      m_flat->setSize(width, thickness);
+      m_flat->setPosition(0.0F, cy - thickness * 0.5F);
+
+      // La onda, pintada a la escala real de la pantalla: un periodo de más para desplazarla sin cortes.
+      const float waveW = width + m_wavelength;
+      const float waveH = amplitude * 2.0F + thickness + 2.0F * s;
+      const int tw = std::max(1, static_cast<int>(std::ceil(waveW * bufferScale)));
+      const int th = std::max(1, static_cast<int>(std::ceil(waveH * bufferScale)));
+      std::vector<std::uint8_t> pixels(static_cast<std::size_t>(tw) * th * 4);
+      const float k = 2.0F * std::numbers::pi_v<float> / (m_wavelength * bufferScale);
+      const float amp = amplitude * bufferScale;
+      const float half = thickness * bufferScale * 0.5F;
+      const float mid = static_cast<float>(th) * 0.5F;
+      for (int x = 0; x < tw; ++x) {
+        const float px = static_cast<float>(x) + 0.5F;
+        const float curve = mid + amp * std::sin(k * px);
+        const float slope = amp * k * std::cos(k * px);
+        const float norm = 1.0F / std::sqrt(1.0F + slope * slope); // distancia vertical → perpendicular
+        for (int y = 0; y < th; ++y) {
+          const float d = std::abs(static_cast<float>(y) + 0.5F - curve) * norm;
+          const float a = std::clamp(half - d + 0.5F, 0.0F, 1.0F);
+          std::fill_n(pixels.begin() + (static_cast<std::size_t>(y) * tw + x) * 4, 4, static_cast<std::uint8_t>(std::lround(a * 255.0F)));
+        }
+      }
+      m_wave = static_cast<Image*>(m_clip->addChild(std::make_unique<Image>()));
+      m_wave->setSourceRaw(renderer, pixels.data(), pixels.size(), tw, th, tw * 4, PixmapFormat::RGBA);
+      m_wave->setFit(ImageFit::Stretch);
+      m_wave->setTint(primary);
+      m_wave->setSize(waveW, waveH);
+      m_wave->setPosition(0.0F, cy - waveH * 0.5F);
+
+      m_thumb = static_cast<RectNode*>(addChild(std::make_unique<RectNode>()));
+      m_thumb->setStyle(style(primary, 2.0F * s));
+      m_thumb->setSize(4.0F * s, 22.0F * s);
+      m_thumb->setPosition(0.0F, cy - 11.0F * s);
+
+      m_area = static_cast<InputArea*>(addChild(std::make_unique<InputArea>()));
+      m_area->setSize(width, height());
+      m_area->setOnPress([this](const InputArea::PointerData& pointer) {
+        if (pointer.pressed) {
+          m_dragging = true;
+          m_dragFraction = fractionAt(pointer.localX);
+        } else if (m_dragging) {
+          m_dragging = false;
+          m_shown = m_dragFraction;
+          if (m_seek) {
+            m_seek(m_dragFraction);
+          }
+        }
+      });
+      m_area->setOnMotion([this](const InputArea::PointerData& pointer) {
+        if (m_dragging) {
+          m_dragFraction = fractionAt(pointer.localX);
+        }
+      });
+      m_area->setOnCancel([this] { m_dragging = false; });
+    }
+
+    // En cada cuadro: posición y duración en segundos; `dt` en segundos desde el anterior. false = quieta (en
+    // pausa y ya aplanada): no hace falta pintar otro cuadro.
+    bool step(double position, double duration, bool playing, float dt) {
+      const float s = m_scale;
+      const double fraction = duration > 0.0 ? std::clamp(position / duration, 0.0, 1.0) : 0.0;
+      float target = m_dragging ? m_dragFraction : static_cast<float>(fraction);
+      if (m_first) { // recién construida: aparece ya en su sitio, sin deslizarse desde 0
+        m_first = false;
+        m_shown = target;
+        m_amp = playing ? 1.0F : 0.0F;
+      }
+      // Sonando, mpv a veces informa un poco por detrás de lo estimado: no retroceder por eso (un seek sí).
+      if (playing && !m_dragging && target < m_shown && (m_shown - target) * duration < 0.5) {
+        target = m_shown;
+      }
+      // Sigue a la posición de cerca (los saltos de un seek se deslizan en ~100 ms, el avance normal no se nota).
+      m_shown += (target - m_shown) * std::min(1.0F, dt / 0.06F);
+      m_amp += ((playing && !m_dragging ? 1.0F : 0.0F) - m_amp) * std::min(1.0F, dt / 0.18F);
+      m_phase = std::fmod(m_phase + dt * m_amp * m_wavelength / 1.4F, m_wavelength);
+
+      const float gap = 6.0F * s;
+      const float thumbW = m_thumb->width();
+      const float thumbX = m_shown * (width() - thumbW); // sin redondear: avanza en subpíxeles
+      m_thumb->setPosition(thumbX, m_thumb->y());
+      m_clip->setSize(std::max(0.0F, thumbX - gap), height());
+      const float trackX = thumbX + thumbW + gap;
+      m_track->setPosition(trackX, m_track->y());
+      m_track->setSize(std::max(0.0F, width() - trackX), m_track->height());
+      // La onda avanza hacia el indicador; al pausar se aplana (y la línea recta toma su lugar).
+      m_wave->setPosition(m_phase - m_wavelength, m_wave->y());
+      m_wave->setScale(1.0F, std::max(0.02F, m_amp));
+      m_wave->setOpacity(std::clamp(m_amp * 1.5F, 0.0F, 1.0F));
+      m_flat->setOpacity(std::clamp(1.0F - m_amp * 1.5F, 0.0F, 1.0F));
+      return playing || m_dragging || m_amp > 0.001F || std::abs(target - m_shown) > 1e-5F;
+    }
+
+    static constexpr float kHeight = 32.0F;
+
+  private:
+    [[nodiscard]] float fractionAt(float x) const {
+      const float span = std::max(1.0F, width() - m_thumb->width());
+      return std::clamp((x - m_thumb->width() * 0.5F) / span, 0.0F, 1.0F);
+    }
+
+    float m_scale;
+    SeekFn m_seek;
+    float m_wavelength = 40.0F;
+    RectNode* m_track = nullptr;
+    Node* m_clip = nullptr;
+    RectNode* m_flat = nullptr;
+    Image* m_wave = nullptr;
+    RectNode* m_thumb = nullptr;
+    InputArea* m_area = nullptr;
+    float m_shown = 0.0F;
+    float m_amp = 0.0F;
+    float m_phase = 0.0F;
+    bool m_dragging = false;
+    float m_dragFraction = 0.0F;
+    bool m_first = true;
+  };
+
   class LyricsBlock final : public Node {
   public:
     LyricsBlock(float width, float margin, float gap, float spacer, float fontSize, float bigFontSize, ColorSpec color, bool depth)
@@ -629,6 +789,11 @@ namespace okaru::music {
     m_app.setBuild([this](float w, float h, float s) { return build(w, h, s); });
     m_app.setKeyHandler([this](const KeyboardEvent& event) { return onKey(event); });
     m_app.setAfterBuild([this] {
+      // Cada cuadro mueve la lava y la barra ondulada (si están en la escena).
+      if (m_wave != nullptr || !m_lavaBlobs.empty()) {
+        m_lavaLast = std::chrono::steady_clock::now();
+        m_frameTick.startRepeating(std::chrono::milliseconds(16), [this] { stepFrame(); });
+      }
       if (m_dialogInput != nullptr) {
         m_app.focus(m_dialogInput->inputArea());
       } else if (m_focusSearch && m_search != nullptr) {
@@ -650,6 +815,36 @@ namespace okaru::music {
       }
     });
 
+    // Servidores: un identificador propio para Jellyfin, sus secretos del llavero, y las rutas remotas como streaming.
+    if (m_state.deviceId.empty()) {
+      m_state.deviceId = std::format("valandy-{:08x}{:08x}", g_random_int(), g_random_int());
+    }
+    m_remote = std::make_unique<RemoteSources>(m_app, m_state.deviceId);
+    m_remote->setServers(m_state.servers);
+    m_player.setYtdlCookies(m_remote->ytdlCookies());
+    YouTubeLogin::cleanLeftovers();
+    // YouTube Music: la URL directa si ya se resolvió por adelantado; si no, yt-dlp dentro de mpv (más lento).
+    m_streams = std::make_unique<StreamResolver>([this](const std::string& videoId) {
+      const auto& queue = m_player.state().queue;
+      for (std::size_t i = 0; i < queue.size(); ++i) {
+        RemoteRef ref;
+        if (static_cast<std::int64_t>(i) != m_player.state().current && queue[i].starts_with("yt://")
+            && parseRemote(queue[i], ref) && ref.item == videoId) {
+          m_player.refreshItem(i);
+        }
+      }
+    });
+    m_streams->setCookies(m_remote->ytdlCookies());
+    m_player.setOnStreamFailed([this](const std::string& url) { m_streams->forget(url); });
+    m_player.setResolver([this](const std::string& path) {
+      RemoteRef ref;
+      if (path.starts_with("yt://") && parseRemote(path, ref)) {
+        if (std::string url = m_streams->cached(ref.item); !url.empty()) {
+          return url;
+        }
+      }
+      return isRemote(path) ? m_remote->streamUrl(path) : std::string();
+    });
     m_player.setVolume(m_state.volume);
     m_player.setShuffle(m_state.shuffle);
     m_player.setRepeat(m_state.repeat);
@@ -675,6 +870,7 @@ namespace okaru::music {
     // Biblioteca vacía: siempre se lee; si no, solo si está activado buscar cambios al abrir.
     if (m_model.tracks.empty() || m_state.settings.scanOnStart) {
       rescan();
+      syncServers();
     } else {
       fetchMissingCovers();
     }
@@ -685,6 +881,20 @@ namespace okaru::music {
   // ── Biblioteca ────────────────────────────────────────────────────────────────────────────────────
 
   void MusicWindow::setModel(Model model) {
+    m_all = model.tracks;
+    m_allByPath.clear();
+    m_allByPath.reserve(m_all.size());
+    for (std::size_t i = 0; i < m_all.size(); ++i) {
+      m_allByPath.emplace(m_all[i].path, i);
+    }
+    if (!m_state.source.empty() && m_state.source != "local" && sourceServer() == nullptr) {
+      m_state.source.clear(); // el servidor elegido ya no existe
+    }
+    if (!m_state.source.empty()) {
+      std::vector<Track> kept;
+      std::ranges::copy_if(m_all, std::back_inserter(kept), [this](const Track& t) { return inSource(t.path); });
+      model = organize(std::move(kept));
+    }
     m_model = std::move(model);
     m_byPath.clear();
     m_byPath.reserve(m_model.tracks.size());
@@ -697,6 +907,89 @@ namespace okaru::music {
     m_shownItem.clear();
     m_lyricsItem.clear(); // las canciones se rehicieron: la letra se vuelve a resolver
     m_app.requestRebuild();
+  }
+
+  const Server* MusicWindow::sourceServer() const {
+    const auto it = std::ranges::find(m_state.servers, m_state.source, &Server::id);
+    return it != m_state.servers.end() ? &*it : nullptr;
+  }
+
+  bool MusicWindow::inSource(const std::string& path) const {
+    if (m_state.source.empty()) {
+      return true;
+    }
+    if (m_state.source == "local") {
+      return path.starts_with('/');
+    }
+    const Server* server = sourceServer();
+    return server != nullptr && path.starts_with(remotePrefix(*server));
+  }
+
+  void MusicWindow::setSource(std::string source) {
+    if (source == m_state.source) {
+      return;
+    }
+    m_state.source = std::move(source);
+    saveState();
+    m_ytResults.clear();
+    m_ytQuery.clear();
+    setModel(organize(m_all));
+    if (!m_query.empty()) {
+      searchYouTube();
+    }
+  }
+
+  void MusicWindow::searchYouTube() {
+    const Server* server = sourceServer();
+    m_ytSearchTimer.stop();
+    if (server == nullptr || server->kind != ServerKind::YouTube || m_query.empty()) {
+      m_ytSearching = false;
+      return;
+    }
+    m_ytSearching = true;
+    // Espera a que se deje de escribir: una búsqueda por pausa, no por tecla.
+    m_ytSearchTimer.start(std::chrono::milliseconds(400), [this, server = *server] {
+      const std::string query = m_query;
+      m_remote->searchYouTube(server, query, [this, query](std::vector<Track> tracks) {
+        if (query != m_query) {
+          return; // ya se escribió otra cosa
+        }
+        m_ytSearching = false;
+        m_ytQuery = query;
+        m_ytResults.clear();
+        for (Track& track : tracks) {
+          m_ytResults.push_back(track.path);
+          if (!m_allByPath.contains(track.path)) {
+            m_extraTracks.insert_or_assign(track.path, std::move(track));
+          }
+        }
+        m_app.requestRebuild();
+      });
+    });
+  }
+
+  void MusicWindow::fetchExtraCover(const std::string& item) {
+    const auto it = m_extraTracks.find(item);
+    if (it == m_extraTracks.end() || !it->second.cover.empty() || !m_extraCovers.insert(item).second) {
+      return;
+    }
+    const fs::path target = coverPathFor(it->second, m_library.coversDir());
+    auto done = [this, item, target](bool ok) {
+      if (const auto found = m_extraTracks.find(item); ok && found != m_extraTracks.end()) {
+        found->second.cover = target.string();
+        m_shownItem.clear(); // la barra de abajo y el reproductor la muestran ya
+        refreshNowPlaying();
+        if (m_fullPlayer || m_app.fullscreen()) {
+          m_app.requestRebuild();
+        }
+      }
+    };
+    std::error_code ec;
+    if (fs::exists(target, ec)) {
+      done(true);
+    } else {
+      m_online.downloadCover(m_remote->coverUrl(item), target, std::move(done));
+    }
   }
 
   void MusicWindow::rescan() {
@@ -997,8 +1290,14 @@ namespace okaru::music {
   }
 
   const Track* MusicWindow::trackForItem(const std::string& item) const {
-    const auto it = m_byPath.find(item);
-    return it == m_byPath.end() ? nullptr : &m_model.tracks[it->second];
+    if (const auto it = m_byPath.find(item); it != m_byPath.end()) {
+      return &m_model.tracks[it->second];
+    }
+    if (const auto it = m_allByPath.find(item); it != m_allByPath.end()) {
+      return &m_all[it->second];
+    }
+    const auto it = m_extraTracks.find(item);
+    return it == m_extraTracks.end() ? nullptr : &it->second;
   }
 
   const Track* MusicWindow::currentTrack() const { return trackForItem(m_player.currentItem()); }
@@ -1010,6 +1309,9 @@ namespace okaru::music {
   void MusicWindow::onPlayerChange(bool structural) {
     if (m_mpris != nullptr) {
       m_mpris->update();
+    }
+    if (structural) {
+      prefetchUpcoming();
     }
     // El reproductor completo se rehace si cambió la cola o la canción (carátula, letra); el resto solo actualiza
     // la barra de abajo.
@@ -1035,15 +1337,23 @@ namespace okaru::music {
     updateLyricsHighlight();
     if (item != m_shownItem && (m_nowTitle != nullptr)) {
       m_shownItem = item;
+      fetchExtraCover(item);
       const Track* track = trackForItem(item);
       m_nowTitle->setText(
           track != nullptr ? track->title : (item.empty() ? tr("apps.music.nothing-playing") : fs::path(item).filename().string())
       );
       m_nowArtist->setText(track != nullptr ? joinDot({track->artist, track->album}) : "");
       m_nowCover->setCover(track != nullptr ? track->cover : "");
+      if (m_miniBackground != nullptr) {
+        m_miniBackground->setCover(track != nullptr ? track->cover : "");
+      }
+      applyLavaColors(track != nullptr ? track->cover : "");
       if (m_likeButton != nullptr) {
         m_likeButton->setGlyph(m_playlists.liked(item) ? "heart-filled" : "heart");
         m_likeButton->setEnabled(track != nullptr);
+      }
+      if (m_addToButton != nullptr) {
+        m_addToButton->setEnabled(track != nullptr);
       }
       for (VirtualListView* list : {m_trackList, m_queueList}) {
         if (list != nullptr) {
@@ -1054,6 +1364,8 @@ namespace okaru::music {
     if (m_playButton != nullptr) {
       m_playButton->setGlyph(state.paused || state.idle ? "player-play" : "player-pause");
       m_playButton->setTooltip(state.paused ? tr("apps.music.play") : tr("apps.music.pause"));
+    }
+    if (m_shuffleButton != nullptr) {
       m_shuffleButton->setSelected(m_player.shuffled());
       m_repeatButton->setGlyph(repeatGlyph(m_player.repeat()));
       m_repeatButton->setSelected(m_player.repeat() != Repeat::Off);
@@ -1078,11 +1390,17 @@ namespace okaru::music {
     m_trackList = nullptr;
     m_queueList = nullptr;
     m_likeButton = nullptr;
+    m_addToButton = nullptr;
     m_dialogInput = nullptr;
     m_libraryView = nullptr;
     m_playerToggle = nullptr;
     m_search = nullptr;
     m_nowCover = nullptr;
+    m_miniBackground = nullptr;
+    m_lavaBlobs.clear();
+    m_wave = nullptr;
+    m_lavaCover.clear();
+    m_frameTick.stop();
     m_nowTitle = nullptr;
     m_nowArtist = nullptr;
     m_playButton = nullptr;
@@ -1097,7 +1415,30 @@ namespace okaru::music {
     m_lyricsView = nullptr;
     m_lyricLabelOf.clear();
     m_crossfadeLabel = nullptr;
+    m_eqLabels.fill(nullptr);
     m_animScale = scale;
+
+    if (m_app.fullscreen()) {
+      m_windowWidth = width;
+      auto full = buildFullscreen(width, height, scale);
+      if (!m_menu.empty()) {
+        full->addChild(buildMenu(width, height, scale));
+      }
+      refreshNowPlaying();
+      return full;
+    }
+    if (width < kMiniBelowWidth * scale || height < kMiniBelowHeight * scale) {
+      m_windowWidth = width;
+      auto mini = buildMini(width, height, scale);
+      if (!m_menu.empty()) {
+        mini->addChild(buildMenu(width, height, scale));
+      }
+      if (m_dialog != Dialog::None) {
+        mini->addChild(buildDialog(width, height, scale));
+      }
+      refreshNowPlaying();
+      return mini;
+    }
 
     const float header = kHeaderHeight * scale;
     const float bottom = kNowPlayingHeight * scale;
@@ -1179,6 +1520,7 @@ namespace okaru::music {
                   m_query = value;
                   m_fullPlayer = false;
                   m_focusSearch = true;
+                  searchYouTube();
                   m_app.requestRebuild();
                 },
         })
@@ -1240,12 +1582,36 @@ namespace okaru::music {
       const char* glyph;
       const char* key;
     };
-    constexpr std::array<Entry, 4> kEntries{{
+    constexpr std::array<Entry, 5> kEntries{{
+        {View::ForYou, "sparkles", "apps.music.for-you.title"},
         {View::Albums, "disc", "apps.music.albums"},
         {View::Artists, "users", "apps.music.artists"},
         {View::Songs, "music", "apps.music.songs"},
         {View::Genres, "category", "apps.music.genres"},
     }};
+    // Origen que se explora: todo, este equipo o un servidor (solo si hay alguno).
+    if (!m_rail && !m_state.servers.empty()) {
+      std::vector<std::string> options{tr("apps.music.source.all"), tr("apps.music.source.local")};
+      std::vector<std::string> ids{"", "local"};
+      for (const Server& server : m_state.servers) {
+        options.push_back(server.name);
+        ids.push_back(server.id);
+      }
+      const auto selected = static_cast<std::size_t>(std::ranges::find(ids, m_state.source) - ids.begin());
+      side->addChild(ui::select({
+          .options = std::move(options),
+          .selectedIndex = selected < ids.size() ? selected : 0,
+          .width = kSidebarWidth * scale - Style::spaceSm * 2.0F * scale,
+          .onSelectionChanged =
+              [this, ids](std::size_t index, std::string_view) {
+                if (index < ids.size()) {
+                  // Fuera del cambio de selección: la escena se rehace entera.
+                  DeferredCall::callLater([this, id = ids[index]] { setSource(id); });
+                }
+              },
+      }));
+      side->addChild(ui::node({.height = Style::spaceXs * scale}));
+    }
     for (const auto& entry : kEntries) {
       const bool active = m_view == entry.view && m_query.empty();
       side->addChild(entryButton(entry.glyph, entry.key, active, [this, view = entry.view] { show(view); }));
@@ -1318,6 +1684,32 @@ namespace okaru::music {
       );
     }
     return empty;
+  }
+
+  std::unique_ptr<Node> MusicWindow::buildItemTracks(std::vector<std::string> items, float scale) {
+    std::vector<TrackRowData> rows;
+    rows.reserve(items.size());
+    for (std::size_t i = 0; i < items.size(); ++i) {
+      rows.push_back({.track = trackForItem(items[i]), .item = items[i], .number = static_cast<int>(i + 1)});
+    }
+    auto list = std::make_shared<std::vector<std::string>>(std::move(items));
+    m_trackAdapter = std::make_unique<TrackListAdapter>(
+        std::move(rows), scale,
+        TrackListCallbacks{
+            .isCurrent = [this, list](std::size_t index) { return (*list)[index] == m_player.currentItem(); },
+            .activate = [this, list](std::size_t index) { m_player.playQueue(*list, index); },
+            .isLiked = [this, list](std::size_t index) { return m_playlists.liked((*list)[index]); },
+            .toggleLike = [this, list](std::size_t index) { toggleLike((*list)[index]); },
+            .menu = [this, list](std::size_t index, float x, float y) { openSongMenu({(*list)[index]}, x, y); },
+        }
+    );
+    return ui::virtualListView({
+        .out = &m_trackList,
+        .state = &m_scroll[scrollKey(m_view, 0, 0, true)],
+        .contentScale = scale,
+        .adapter = m_trackAdapter.get(),
+        .flexGrow = 1.0F,
+    });
   }
 
   std::unique_ptr<Node> MusicWindow::buildTracks(std::vector<std::size_t> tracks, bool numbers, float scale) {
@@ -1457,6 +1849,7 @@ namespace okaru::music {
         return {"apps.music.sort.name", "apps.music.sort.songs"};
       case View::Settings:
       case View::Playlist:
+      case View::ForYou:
         break;
       }
       return {};
@@ -1487,6 +1880,7 @@ namespace okaru::music {
         break;
       case View::Settings:
       case View::Playlist:
+      case View::ForYou:
         break;
       }
       it = m_sorted.emplace(key, std::move(order)).first;
@@ -1555,6 +1949,22 @@ namespace okaru::music {
       return row;
     };
 
+    if (const Server* server = sourceServer(); !m_query.empty() && server != nullptr && server->kind == ServerKind::YouTube) {
+      // Con el origen en YouTube Music se busca en todo su catálogo, no solo en lo sincronizado.
+      const bool fresh = m_ytQuery == m_query;
+      content->addChild(title(
+          tr("apps.music.youtube.results"),
+          fresh ? trp("apps.music.song-count", static_cast<long>(m_ytResults.size())) : tr("apps.music.youtube.searching")
+      ));
+      if (!fresh && m_ytResults.empty()) {
+        content->addChild(ui::row({.align = FlexAlign::Center}, ui::spinner({})));
+      } else if (fresh && m_ytResults.empty()) {
+        content->addChild(ui::label({.text = tr("apps.music.no-results"), .color = colorSpecFromRole(ColorRole::OnSurfaceVariant)}));
+      } else {
+        content->addChild(buildItemTracks(m_ytResults, scale));
+      }
+      return content;
+    }
     if (!m_query.empty()) {
       auto results = search(m_model, m_query);
       content->addChild(title(tr("apps.music.results"), trp("apps.music.song-count", static_cast<long>(results.size()))));
@@ -1567,6 +1977,9 @@ namespace okaru::music {
     }
     if (m_view == View::Settings) {
       return buildSettings(width, height, scale);
+    }
+    if (m_view == View::ForYou) {
+      return buildForYou(width, height, scale);
     }
     if (m_model.tracks.empty()) {
       return buildEmpty(width, height, scale);
@@ -1693,6 +2106,7 @@ namespace okaru::music {
       break;
     }
     case View::Settings:
+    case View::ForYou:
       break;
     case View::Playlist: {
       const Playlist* list = m_playlists.find(m_playlistId);
@@ -1789,23 +2203,19 @@ namespace okaru::music {
       songArea->setSize(songNode->width(), songNode->height());
     }
     bar->addChild(std::move(songArea));
-    bar->addChild(ui::button({
-        .out = &m_likeButton,
-        .glyph = m_playlists.liked(current) ? "heart-filled" : "heart",
-        .enabled = currentTrack() != nullptr,
-        .variant = ButtonVariant::Ghost,
-        .tooltip = tr("apps.music.like"),
-        .onClick =
-            [this] {
-              if (currentTrack() != nullptr) {
-                toggleLike(m_player.currentItem());
-              }
-            },
-    }));
 
     // Controles y barra de tiempo.
     auto center = ui::column({.align = FlexAlign::Center, .gap = 2.0F * scale, .flexGrow = 1.0F});
     auto buttons = ui::row({.align = FlexAlign::Center, .gap = Style::spaceXs * scale});
+    // Agregar a una lista (a la izquierda, contrapeso del corazón: reproducir queda centrado sobre la barra).
+    buttons->addChild(ui::button({
+        .out = &m_addToButton,
+        .glyph = "playlist-add",
+        .enabled = currentTrack() != nullptr,
+        .variant = ButtonVariant::Ghost,
+        .tooltip = tr("apps.music.menu.add-to-playlist"),
+        .onClick = [this] { openAddToPlaylist(); },
+    }));
     buttons->addChild(
         ui::button({
             .out = &m_shuffleButton,
@@ -1854,6 +2264,20 @@ namespace okaru::music {
                 },
         })
     );
+    // Me gusta, junto a los controles.
+    buttons->addChild(ui::button({
+        .out = &m_likeButton,
+        .glyph = m_playlists.liked(current) ? "heart-filled" : "heart",
+        .enabled = currentTrack() != nullptr,
+        .variant = ButtonVariant::Ghost,
+        .tooltip = tr("apps.music.like"),
+        .onClick =
+            [this] {
+              if (currentTrack() != nullptr) {
+                toggleLike(m_player.currentItem());
+              }
+            },
+    }));
     center->addChild(std::move(buttons));
     // Lo que ocupan los demás: carátula y título, volumen, el botón del reproductor, márgenes y separaciones.
     const float others = side + infoWidth + (showVolume ? 150.0F : 40.0F) * scale + 40.0F * scale
@@ -1863,20 +2287,18 @@ namespace okaru::music {
         ui::row(
             {.align = FlexAlign::Center, .gap = Style::spaceSm * scale, .width = timelineWidth},
             ui::label({.out = &m_positionLabel, .text = "0:00", .fontSize = Style::fontSizeCaption * scale, .minWidth = 40.0F * scale, .textAlign = TextAlign::End}),
-            ui::slider({
-                .out = &m_timeline,
-                .minValue = 0.0,
-                .maxValue = 1.0,
-                .value = 0.0,
-                .wheelAdjustEnabled = false,
-                .flexGrow = 1.0F,
-                .onValueChanged =
-                    [this](double value) {
-                      if (!m_syncingTimeline) {
-                        m_player.seekTo(value);
-                      }
-                    },
-            }),
+            [&]() -> std::unique_ptr<Node> {
+              Renderer* renderer = m_app.renderer();
+              const float waveWidth = std::max(40.0F * scale, timelineWidth - (40.0F * 2.0F + Style::spaceSm * 2.0F) * scale);
+              if (renderer == nullptr) {
+                return ui::node({.width = waveWidth});
+              }
+              auto wave = std::make_unique<WaveSeekBar>(*renderer, waveWidth, scale, m_app.bufferScale(), [this](double fraction) {
+                m_player.seekTo(fraction * m_player.state().duration);
+              });
+              m_wave = wave.get();
+              return wave;
+            }(),
             ui::label({.out = &m_durationLabel, .text = "0:00", .fontSize = Style::fontSizeCaption * scale, .minWidth = 40.0F * scale})
         )
     );
@@ -1911,6 +2333,12 @@ namespace okaru::music {
                 },
         })
     );
+    bar->addChild(ui::button({
+        .glyph = "maximize",
+        .variant = ButtonVariant::Ghost,
+        .tooltip = tr("apps.music.fullscreen"),
+        .onClick = [this] { setFullscreen(true); },
+    }));
     bar->addChild(
         ui::button({
             .out = &m_playerToggle,
@@ -1924,11 +2352,324 @@ namespace okaru::music {
     return bar;
   }
 
-  // ── Reproductor a pantalla completa ──────────────────────────────────────────────────────────────
+  std::unique_ptr<Node> MusicWindow::buildMini(float width, float height, float scale) {
+    const float pad = Style::spaceMd * scale;
+    auto root = ui::node({.width = width, .height = height});
+    root->addChild(ui::box({.fill = colorSpecFromRole(ColorRole::Surface), .width = width, .height = height}));
+    auto background = std::make_unique<CoverImage>();
+    background->setBlur(24);
+    background->setSize(width, height);
+    background->setOpacity(0.28F);
+    m_miniBackground = static_cast<CoverImage*>(root->addChild(std::move(background)));
+
+    // Alta y angosta: carátula arriba; si no, a la izquierda.
+    const bool vertical = height > width * 1.2F;
+    const float controls = 116.0F * scale; // título, artista, botones y barra de tiempo
+    const float side = vertical ? std::max(0.0F, std::min(width - pad * 2.0F, height - controls - pad * 3.0F))
+                                : std::max(0.0F, std::min(height - pad * 2.0F, width * 0.4F));
+    const float textWidth = vertical ? width - pad * 2.0F : std::max(0.0F, width - side - pad * 3.0F);
+    auto cover = std::make_unique<CoverImage>();
+    cover->setSize(side, side);
+    cover->setPosition(vertical ? std::round((width - side) * 0.5F) : pad, pad);
+    m_nowCover = static_cast<CoverImage*>(root->addChild(std::move(cover)));
+    m_app.setDragNode(m_nowCover); // la carátula mueve la ventana flotante
+
+    auto info = ui::column({.align = FlexAlign::Center, .gap = 2.0F * scale, .width = textWidth});
+    info->addChild(ui::label({.out = &m_nowTitle, .text = "", .fontSize = Style::fontSizeBody * scale, .fontWeight = FontWeight::SemiBold, .maxWidth = textWidth, .maxLines = 1}));
+    info->addChild(ui::label({.out = &m_nowArtist, .text = "", .fontSize = Style::fontSizeCaption * scale, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant), .maxWidth = textWidth, .maxLines = 1}));
+    auto buttons = ui::row({.align = FlexAlign::Center, .gap = Style::spaceXs * scale});
+    buttons->addChild(ui::button({.glyph = "player-track-prev", .variant = ButtonVariant::Ghost, .tooltip = tr("apps.music.previous"), .onClick = [this] { m_player.previous(); }}));
+    buttons->addChild(ui::button({.out = &m_playButton, .glyph = "player-play", .variant = ButtonVariant::Primary, .onClick = [this] { m_player.togglePause(); }}));
+    buttons->addChild(ui::button({.glyph = "player-track-next", .variant = ButtonVariant::Ghost, .tooltip = tr("apps.music.next"), .onClick = [this] { m_player.next(); }}));
+    buttons->addChild(ui::button({
+        .out = &m_likeButton,
+        .glyph = m_playlists.liked(m_player.currentItem()) ? "heart-filled" : "heart",
+        .enabled = currentTrack() != nullptr,
+        .variant = ButtonVariant::Ghost,
+        .tooltip = tr("apps.music.like"),
+        .onClick =
+            [this] {
+              if (currentTrack() != nullptr) {
+                toggleLike(m_player.currentItem());
+              }
+            },
+    }));
+    info->addChild(std::move(buttons));
+    info->addChild(ui::row(
+        {.align = FlexAlign::Center, .gap = Style::spaceXs * scale, .width = textWidth},
+        ui::label({.out = &m_positionLabel, .text = "0:00", .fontSize = Style::fontSizeCaption * scale, .minWidth = 34.0F * scale, .textAlign = TextAlign::End}),
+        ui::slider({
+            .out = &m_timeline,
+            .minValue = 0.0,
+            .maxValue = 1.0,
+            .value = 0.0,
+            .wheelAdjustEnabled = false,
+            .flexGrow = 1.0F,
+            .onValueChanged =
+                [this](double value) {
+                  if (!m_syncingTimeline) {
+                    m_player.seekTo(value);
+                  }
+                },
+        }),
+        ui::label({.out = &m_durationLabel, .text = "0:00", .fontSize = Style::fontSizeCaption * scale, .minWidth = 34.0F * scale})
+    ));
+    if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
+      info->layout(*renderer);
+    }
+    info->setPosition(
+        vertical ? pad : side + pad * 2.0F,
+        vertical ? side + pad * 2.0F : std::round((height - info->height()) * 0.5F)
+    );
+    root->addChild(std::move(info));
+    return root;
+  }
+
+  void MusicWindow::setFullscreen(bool fullscreen) {
+    m_menu.clear();
+    m_app.setFullscreen(fullscreen);
+    m_app.requestRebuild();
+  }
 
   namespace {
+    constexpr std::size_t kLavaBlobs = 5;
+    // Recorrido de cada mancha: centro (fracción de la ventana), amplitud y velocidad (rad/s) por eje, fase.
+    struct LavaPath {
+      float cx, cy, ax, ay, sx, sy, phase, size;
+    };
+    constexpr std::array<LavaPath, kLavaBlobs> kLavaPaths{{
+        {0.25F, 0.30F, 0.22F, 0.20F, 0.071F, 0.053F, 0.0F, 0.85F},
+        {0.75F, 0.25F, 0.20F, 0.24F, 0.059F, 0.083F, 1.7F, 0.75F},
+        {0.50F, 0.70F, 0.28F, 0.18F, 0.047F, 0.067F, 3.1F, 0.95F},
+        {0.15F, 0.80F, 0.18F, 0.22F, 0.089F, 0.043F, 4.4F, 0.65F},
+        {0.85F, 0.75F, 0.21F, 0.19F, 0.061F, 0.079F, 5.6F, 0.70F},
+    }};
+    // Mancha difusa: blanco con alfa que cae suave desde el centro (premultiplicado); se tiñe con setTint.
+    const std::vector<std::uint8_t>& lavaTexture(int size) {
+      static std::vector<std::uint8_t> pixels;
+      if (pixels.empty()) {
+        pixels.resize(static_cast<std::size_t>(size * size * 4));
+        const float half = static_cast<float>(size) * 0.5F;
+        for (int y = 0; y < size; ++y) {
+          for (int x = 0; x < size; ++x) {
+            const float dx = (static_cast<float>(x) + 0.5F - half) / half;
+            const float dy = (static_cast<float>(y) + 0.5F - half) / half;
+            // Núcleo sólido hasta el 50 % del radio y borde difuso (smoothstep) hasta el final.
+            const float r = std::clamp((std::sqrt(dx * dx + dy * dy) - 0.5F) / 0.5F, 0.0F, 1.0F);
+            const float falloff = 1.0F - r * r * (3.0F - 2.0F * r);
+            const auto a = static_cast<std::uint8_t>(std::lround(falloff * 255.0F));
+            std::fill_n(pixels.begin() + (y * size + x) * 4, 4, a);
+          }
+        }
+      }
+      return pixels;
+    }
+    constexpr int kLavaTexture = 128;
 
+    // Velo vertical: de transparente arriba a casi opaco abajo (premultiplicado), teñido con el color de fondo.
+    constexpr int kVeilTexture = 256;
+    const std::vector<std::uint8_t>& veilTexture() {
+      static std::vector<std::uint8_t> pixels;
+      if (pixels.empty()) {
+        pixels.resize(kVeilTexture * 4);
+        for (int y = 0; y < kVeilTexture; ++y) {
+          const float t = static_cast<float>(y) / static_cast<float>(kVeilTexture - 1);
+          const float alpha = 0.85F * t * t * (3.0F - 2.0F * t);
+          std::fill_n(pixels.begin() + y * 4, 4, static_cast<std::uint8_t>(std::lround(alpha * 255.0F)));
+        }
+      }
+      return pixels;
+    }
   } // namespace
+
+  void MusicWindow::applyLavaColors(const std::string& cover) {
+    if (m_lavaBlobs.empty() || cover == m_lavaCover) {
+      return;
+    }
+    m_lavaCover = cover;
+    std::vector<Rgb> colors;
+    if (!cover.empty()) {
+      if (auto image = loadImageFile(cover, 48)) {
+        colors = dominantColors(image->rgba, kLavaBlobs);
+      }
+    }
+    for (std::size_t i = 0; i < m_lavaBlobs.size(); ++i) {
+      if (colors.empty()) {
+        // Sin carátula: los colores del tema.
+        constexpr std::array<ColorRole, 3> roles{ColorRole::Primary, ColorRole::Tertiary, ColorRole::Secondary};
+        m_lavaBlobs[i]->setTint(resolveColorSpec(colorSpecFromRole(roles[i % roles.size()])));
+      } else {
+        const Rgb& c = colors[i % colors.size()];
+        m_lavaBlobs[i]->setTint(Color{c[0], c[1], c[2], 1.0F});
+      }
+    }
+    m_app.invalidate();
+  }
+
+  void MusicWindow::stepFrame() {
+    const float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - m_lavaStart).count();
+    for (std::size_t i = 0; i < m_lavaBlobs.size(); ++i) {
+      const LavaPath& p = kLavaPaths[i];
+      Image* blob = m_lavaBlobs[i];
+      const float x = m_lavaWidth * (p.cx + p.ax * std::sin(t * p.sx + p.phase));
+      const float y = m_lavaHeight * (p.cy + p.ay * std::cos(t * p.sy + p.phase * 0.7F));
+      blob->setPosition(std::round(x - blob->width() * 0.5F), std::round(y - blob->height() * 0.5F));
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const float dt = std::min(0.1F, std::chrono::duration<float>(now - m_lavaLast).count());
+    m_lavaLast = now;
+    bool moving = !m_lavaBlobs.empty();
+    if (m_wave != nullptr) {
+      const auto& state = m_player.state();
+      moving = m_wave->step(estimatedPosition(), state.duration, !state.paused && !state.idle, dt) || moving;
+    }
+    if (moving) {
+      m_app.requestFrame();
+    }
+  }
+
+  std::unique_ptr<Node> MusicWindow::buildFullscreen(float width, float height, float scale) {
+    const float pad = Style::spaceLg * 3.0F * scale;
+    const Track* track = currentTrack();
+    const std::string item = m_player.currentItem();
+    auto root = ui::node({.width = width, .height = height});
+    root->addChild(ui::box({.fill = colorSpecFromRole(ColorRole::Surface), .width = width, .height = height}));
+
+    // Lava: manchas grandes y difusas que se mueven despacio; encima, un velo para que el texto se lea.
+    m_lavaWidth = width;
+    m_lavaHeight = height;
+    const float base = std::max(width, height);
+    if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
+      const auto& texture = lavaTexture(kLavaTexture);
+      for (const LavaPath& path : kLavaPaths) {
+        const float size = std::round(base * path.size * 1.1F); // el borde se desvanece: algo más grande que se ve
+        auto blob = std::make_unique<Image>();
+        blob->setSourceRaw(*renderer, texture.data(), texture.size(), kLavaTexture, kLavaTexture, kLavaTexture * 4, PixmapFormat::RGBA);
+        blob->setFit(ImageFit::Stretch);
+        blob->setSize(size, size);
+        blob->setOpacity(0.85F);
+        m_lavaBlobs.push_back(static_cast<Image*>(root->addChild(std::move(blob))));
+      }
+    }
+    root->addChild(ui::box({.fill = colorSpecFromRole(ColorRole::Surface, 0.25F), .width = width, .height = height}));
+    applyLavaColors(track != nullptr ? track->cover : "");
+    stepFrame();
+
+    // Abajo: la canción (carátula y título grande) y, debajo, el tiempo y los controles.
+    const float controlsHeight = 120.0F * scale;
+    const float side = std::clamp(std::min(width, height) * 0.30F, 120.0F * scale, 440.0F * scale);
+    const float songTop = height - pad - controlsHeight - side - Style::spaceLg * scale;
+    // Velo en degradado desde algo arriba de la carátula: el texto y los controles se leen sin un panel con borde.
+    if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
+      const auto& texture = veilTexture();
+      auto veil = std::make_unique<Image>();
+      veil->setSourceRaw(*renderer, texture.data(), texture.size(), 1, kVeilTexture, 4, PixmapFormat::RGBA);
+      veil->setFit(ImageFit::Stretch);
+      veil->setTint(resolveColorSpec(colorSpecFromRole(ColorRole::Surface)));
+      const float veilTop = std::max(0.0F, songTop - side * 0.25F);
+      veil->setSize(width, height - veilTop);
+      veil->setPosition(0.0F, veilTop);
+      root->addChild(std::move(veil));
+    }
+    auto cover = std::make_unique<CoverImage>();
+    cover->setSize(side, side);
+    cover->setPosition(pad, songTop);
+    m_nowCover = static_cast<CoverImage*>(root->addChild(std::move(cover)));
+
+    // El texto va puesto antes de medir (si no, mide vacío y queda corrido); una línea cada uno: alto fijo.
+    const float textWidth = std::max(0.0F, width - side - pad * 2.0F - Style::spaceLg * 2.0F * scale);
+    auto info = ui::column({.align = FlexAlign::Start, .gap = Style::spaceSm * scale, .width = textWidth});
+    info->addChild(ui::label({
+        .out = &m_nowTitle,
+        .text = track != nullptr ? track->title : (item.empty() ? tr("apps.music.nothing-playing") : fs::path(item).filename().string()),
+        .fontSize = Style::fontSizeHeader * 3.0F * scale,
+        .fontWeight = FontWeight::Bold,
+        .maxWidth = textWidth,
+        .maxLines = 1,
+    }));
+    info->addChild(ui::label({
+        .out = &m_nowArtist,
+        .text = track != nullptr ? joinDot({track->artist, track->album}) : "",
+        .fontSize = Style::fontSizeHeader * scale,
+        .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+        .maxWidth = textWidth,
+        .maxLines = 1,
+    }));
+    if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
+      info->layout(*renderer);
+    }
+    info->setPosition(pad + side + Style::spaceLg * 2.0F * scale, songTop + side - info->height());
+    root->addChild(std::move(info));
+
+    const float barWidth = width - pad * 2.0F;
+    auto controls = ui::column({.align = FlexAlign::Center, .gap = Style::spaceMd * scale, .width = barWidth});
+    controls->addChild(ui::row(
+        {.align = FlexAlign::Center, .gap = Style::spaceMd * scale, .width = barWidth},
+        ui::label({.out = &m_positionLabel, .text = "0:00", .fontSize = Style::fontSizeBody * scale, .minWidth = 48.0F * scale, .textAlign = TextAlign::End}),
+        [&]() -> std::unique_ptr<Node> {
+          Renderer* renderer = m_app.renderer();
+          if (renderer == nullptr) {
+            return ui::node({.flexGrow = 1.0F});
+          }
+          const float waveWidth = barWidth - (48.0F * 2.0F + Style::spaceMd * 2.0F) * scale;
+          auto wave = std::make_unique<WaveSeekBar>(*renderer, waveWidth, scale, m_app.bufferScale(), [this](double fraction) {
+            m_player.seekTo(fraction * m_player.state().duration);
+          });
+          m_wave = wave.get();
+          return wave;
+        }(),
+        ui::label({.out = &m_durationLabel, .text = "0:00", .fontSize = Style::fontSizeBody * scale, .minWidth = 48.0F * scale})
+    ));
+    // Controles grandes centrados; salir, a la derecha.
+    const float glyph = 26.0F * scale;
+    const float button = 52.0F * scale;
+    auto buttons = ui::row({.align = FlexAlign::Center, .gap = Style::spaceMd * scale});
+    const auto control = [&](Button** out, const char* name, const std::string& tooltip, std::function<void()> click) {
+      buttons->addChild(ui::button({
+          .out = out,
+          .glyph = name,
+          .glyphSize = glyph,
+          .controlHeight = button,
+          .variant = ButtonVariant::Ghost,
+          .tooltip = tooltip,
+          .minWidth = button,
+          .onClick = std::move(click),
+      }));
+    };
+    control(&m_likeButton, m_playlists.liked(item) ? "heart-filled" : "heart", tr("apps.music.like"), [this] {
+      if (currentTrack() != nullptr) {
+        toggleLike(m_player.currentItem());
+      }
+    });
+    control(&m_shuffleButton, "arrows-shuffle", tr("apps.music.shuffle"), [this] { m_player.setShuffle(!m_player.shuffled()); });
+    control(nullptr, "player-track-prev", tr("apps.music.previous"), [this] { m_player.previous(); });
+    buttons->addChild(ui::button({
+        .out = &m_playButton,
+        .glyph = "player-play",
+        .glyphSize = glyph * 1.3F,
+        .controlHeight = button * 1.35F,
+        .variant = ButtonVariant::Primary,
+        .minWidth = button * 1.35F,
+        .onClick = [this] { m_player.togglePause(); },
+    }));
+    control(nullptr, "player-track-next", tr("apps.music.next"), [this] { m_player.next(); });
+    control(&m_repeatButton, "repeat", tr("apps.music.repeat"), [this] {
+      const Repeat next = m_player.repeat() == Repeat::Off ? Repeat::All
+          : m_player.repeat() == Repeat::All               ? Repeat::One
+                                                           : Repeat::Off;
+      m_player.setRepeat(next);
+    });
+    control(nullptr, "minimize", tr("apps.music.exit-fullscreen"), [this] { setFullscreen(false); });
+    controls->addChild(std::move(buttons));
+    if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
+      controls->layout(*renderer);
+    }
+    controls->setPosition(pad, height - pad - controls->height() + Style::spaceLg * scale);
+    root->addChild(std::move(controls));
+    return root;
+  }
+
+  // ── Reproductor a pantalla completa ──────────────────────────────────────────────────────────────
 
   std::unique_ptr<Node> MusicWindow::buildFullPlayer(float width, float height, float scale) {
     m_queueAdapter.reset();
@@ -2004,7 +2745,10 @@ namespace okaru::music {
         .align = FlexAlign::Stretch,
         .gap = Style::spaceSm * scale,
         .padding = Style::spaceMd * scale,
-        .fill = colorSpecFromRole(ColorRole::SurfaceContainer, 0.85F),
+        // Borde y fondo casi opaco: el límite de la tarjeta se ve sobre cualquier carátula del fondo.
+        .fill = colorSpecFromRole(ColorRole::SurfaceContainer, 0.94F),
+        .radius = Style::spaceMd * scale,
+        .border = colorSpecFromRole(ColorRole::OutlineVariant),
         .width = panelWidth,
         .height = panelHeight,
     });
@@ -2094,7 +2838,7 @@ namespace okaru::music {
             .menu =
                 [this](std::size_t index, float x, float y) {
                   if (index < m_player.state().queue.size()) {
-                    openSongMenu({m_player.state().queue[index]}, x, y);
+                    openSongMenu({m_player.state().queue[index]}, x, y, 0, 0, static_cast<std::int64_t>(index));
                   }
                 },
         }
@@ -2153,6 +2897,7 @@ namespace okaru::music {
         .out = &m_lyricsView,
         .state = &m_lyricsScroll,
         .contentScale = scale,
+        .scrollbarVisible = false, // la letra se desplaza con la rueda, sin barra a la vista
         .width = width,
         .flexGrow = 1.0F,
     });
@@ -2366,13 +3111,13 @@ namespace okaru::music {
     m_player.setCrossfade(settings.crossfade);
     m_player.setGapless(settings.gapless);
     m_player.setReplayGain(static_cast<int>(settings.replayGain));
+    m_player.setEqualizer(settings.equalizer ? &settings.eqGains : nullptr);
   }
 
   void MusicWindow::fetchMissingCovers() {
-    if (!m_state.settings.covers.on(Source::Online)) {
-      return;
-    }
     // Una petición por álbum sin carátula (o por canción suelta, sin álbum); lo ya buscado sin éxito no se repite.
+    // Las de un servidor vienen de él (siempre); las locales, de internet si está activado.
+    const bool online = m_state.settings.covers.on(Source::Online);
     for (const Album& album : m_model.albums) {
       if (!album.cover.empty() || album.tracks.empty()) {
         continue;
@@ -2380,49 +3125,465 @@ namespace okaru::music {
       const auto groups = album.title.empty() ? album.tracks : std::vector<std::size_t>{album.tracks.front()};
       for (std::size_t index : groups) {
         const Track& track = m_model.tracks[index];
-        const fs::path target = coverPathFor(track, m_library.coversDir());
-        std::error_code ec;
-        if (m_coversFetching.contains(target.string()) || OnlineService::knownMissing(target) || fs::exists(target, ec)) {
+        const bool remote = isRemote(track.path);
+        if (!remote && !online) {
           continue;
         }
-        m_coversFetching.insert(target.string());
+        const fs::path target = coverPathFor(track, m_library.coversDir());
+        if (m_coversFetching.contains(target.string()) || OnlineService::knownMissing(target)) {
+          continue;
+        }
         // Las canciones que comparten esa carátula: el álbum entero, o solo esa.
         std::vector<std::string> paths;
         for (std::size_t t : album.title.empty() ? std::vector<std::size_t>{index} : album.tracks) {
           paths.push_back(m_model.tracks[t].path);
         }
-        m_online.fetchCover(track, target, [this, target, paths = std::move(paths)](bool ok) {
+        m_coversFetching.insert(target.string());
+        auto done = [this, target, paths = std::move(paths)](bool ok) {
           m_coversFetching.erase(target.string());
-          if (!ok) {
-            return;
+          if (ok) {
+            applyCover(paths, target.string());
           }
-          m_library.setCover(paths, target.string());
-          for (const auto& path : paths) {
-            if (const auto it = m_byPath.find(path); it != m_byPath.end()) {
-              m_model.tracks[it->second].cover = target.string();
-            }
-          }
-          for (Album& a : m_model.albums) {
-            if (a.cover.empty() && !a.tracks.empty() && m_model.tracks[a.tracks.front()].cover == target.string()) {
-              a.cover = target.string();
-            }
-          }
-          for (Artist& artist : m_model.artists) {
-            for (std::size_t a : artist.albums) {
-              if (artist.cover.empty() && !m_model.albums[a].cover.empty()) {
-                artist.cover = m_model.albums[a].cover;
-              }
-            }
-          }
-          // Varias pueden llegar seguidas: una sola reconstrucción. Con el reproductor abierto no se toca la vista.
-          m_coverRebuild.start(std::chrono::milliseconds(1500), [this] {
-            if (!m_fullPlayer) {
+        };
+        std::error_code ec;
+        if (fs::exists(target, ec)) {
+          done(true); // ya estaba guardada (otro álbum igual, o una sincronización anterior)
+        } else if (remote) {
+          m_online.downloadCover(m_remote->coverUrl(track.path), target, std::move(done));
+        } else {
+          m_online.fetchCover(track, target, std::move(done));
+        }
+      }
+    }
+  }
+
+  void MusicWindow::applyCover(const std::vector<std::string>& paths, const std::string& cover) {
+    m_library.setCover(paths, cover);
+    for (const auto& path : paths) {
+      if (const auto it = m_allByPath.find(path); it != m_allByPath.end()) {
+        m_all[it->second].cover = cover;
+      }
+      if (const auto it = m_byPath.find(path); it != m_byPath.end()) {
+        m_model.tracks[it->second].cover = cover;
+      }
+    }
+    for (Album& a : m_model.albums) {
+      if (a.cover.empty() && !a.tracks.empty() && m_model.tracks[a.tracks.front()].cover == cover) {
+        a.cover = cover;
+      }
+    }
+    for (Artist& artist : m_model.artists) {
+      for (std::size_t a : artist.albums) {
+        if (artist.cover.empty() && !m_model.albums[a].cover.empty()) {
+          artist.cover = m_model.albums[a].cover;
+        }
+      }
+    }
+    // Varias pueden llegar seguidas: una sola reconstrucción. Con el reproductor abierto no se toca la vista.
+    m_coverRebuild.start(std::chrono::milliseconds(1500), [this] {
+      if (!m_fullPlayer) {
+        m_app.requestRebuild();
+      }
+    });
+  }
+
+  // ── Recomendaciones («Para ti») ─────────────────────────────────────────────────────────────────
+
+  const Server* MusicWindow::youTubeServer() const {
+    const auto it = std::ranges::find(m_state.servers, ServerKind::YouTube, &Server::kind);
+    return it != m_state.servers.end() ? &*it : nullptr;
+  }
+
+  void MusicWindow::prefetchUpcoming() {
+    const auto& state = m_player.state();
+    const std::size_t count = state.queue.size();
+    if (m_streams == nullptr || state.current < 0 || count == 0) {
+      return;
+    }
+    // Las tres siguientes (con «repetir todo», dando la vuelta).
+    std::vector<std::string> ids;
+    for (std::size_t k = 1; k <= 3; ++k) {
+      std::size_t i = static_cast<std::size_t>(state.current) + k;
+      if (i >= count) {
+        if (m_player.repeat() != Repeat::All) {
+          break;
+        }
+        i %= count;
+      }
+      RemoteRef ref;
+      if (state.queue[i].starts_with("yt://") && parseRemote(state.queue[i], ref)) {
+        ids.push_back(ref.item);
+      }
+    }
+    if (!ids.empty()) {
+      m_streams->prefetch(ids);
+    }
+  }
+
+  void MusicWindow::playExtra(std::vector<Track> tracks, std::size_t start) {
+    std::vector<std::string> paths;
+    paths.reserve(tracks.size());
+    for (Track& track : tracks) {
+      paths.push_back(track.path);
+      if (!m_allByPath.contains(track.path)) {
+        m_extraTracks.insert_or_assign(track.path, std::move(track));
+      }
+    }
+    if (!paths.empty()) {
+      m_player.playQueue(paths, std::min(start, paths.size() - 1));
+    }
+  }
+
+  void MusicWindow::startRadio(const std::string& path) {
+    const Server* found = youTubeServer();
+    if (found == nullptr) {
+      return;
+    }
+    const Server server = *found;
+    RemoteRef ref;
+    // La canción misma primero (con sus datos y carátula de la biblioteca) y luego la radio, sin la versión con
+    // la que YouTube la empieza.
+    const auto follow = [this, path](std::vector<Track> tracks) {
+      if (!tracks.empty()) {
+        tracks.erase(tracks.begin());
+      }
+      std::vector<std::string> paths{path};
+      for (Track& t : tracks) {
+        if (t.path == path) {
+          continue;
+        }
+        paths.push_back(t.path);
+        if (!m_allByPath.contains(t.path)) {
+          m_extraTracks.insert_or_assign(t.path, std::move(t));
+        }
+      }
+      m_player.playQueue(paths, 0);
+    };
+    if (path.starts_with("yt://") && parseRemote(path, ref)) {
+      m_remote->youTubeRadio(server, ref.item, follow);
+      return;
+    }
+    // Una canción propia: se busca en YouTube Music y la radio sigue después de ella (que suena desde aquí).
+    const Track* track = trackForItem(path);
+    if (track == nullptr) {
+      return;
+    }
+    m_remote->searchYouTube(server, track->title + " " + track->artist, [this, server, follow](std::vector<Track> results) {
+      RemoteRef first;
+      if (results.empty() || !parseRemote(results.front().path, first)) {
+        return;
+      }
+      m_remote->youTubeRadio(server, first.item, follow);
+    });
+  }
+
+  void MusicWindow::loadHome(bool force) {
+    const Server* server = youTubeServer();
+    if (server == nullptr || m_homeLoading || (m_homeLoaded && !force)) {
+      return;
+    }
+    m_homeLoading = true;
+    m_remote->youTubeHome(*server, [this](bool ok, std::vector<YtShelf> shelves) {
+      m_homeLoading = false;
+      m_homeLoaded = true;
+      if (ok) {
+        m_home = std::move(shelves);
+      }
+      if (m_view == View::ForYou) {
+        m_app.requestRebuild();
+      }
+    });
+    m_app.requestRebuild();
+  }
+
+  void MusicWindow::playCard(const YtCard& card, const std::string& key) {
+    const Server* server = youTubeServer();
+    if (server == nullptr || !m_cardLoading.empty()) {
+      return;
+    }
+    m_cardLoading = key;
+    m_app.requestRebuild();
+    auto done = [this](std::vector<Track> tracks) {
+      m_cardLoading.clear();
+      playExtra(std::move(tracks), 0);
+      m_app.requestRebuild();
+    };
+    // Una canción empieza su radio, como en YouTube Music; un álbum o una lista, sus canciones.
+    if (card.kind == YtCard::Kind::Song) {
+      // Primero la canción de la tarjeta tal cual (su título y la misma carátula, ya descargada): la radio de
+      // YouTube empieza por «su» video, que a veces es otra versión (el videoclip) con otra imagen.
+      Track own = m_remote->ytTrack(*server, {.videoId = card.videoId, .title = card.title, .artist = card.artist,
+                                               .artistLinked = true, .album = card.album, .thumbnail = card.thumbnail});
+      own.cover = cardCover(card.thumbnail);
+      m_remote->youTubeRadio(*server, card.videoId, [this, own = std::move(own)](std::vector<Track> tracks) mutable {
+        if (!tracks.empty()) {
+          tracks.erase(tracks.begin());
+        }
+        std::erase_if(tracks, [&](const Track& t) { return t.path.ends_with("/" + own.path.substr(own.path.rfind('/') + 1)); });
+        tracks.insert(tracks.begin(), std::move(own));
+        m_cardLoading.clear();
+        playExtra(std::move(tracks), 0);
+        m_app.requestRebuild();
+      });
+    } else {
+      m_remote->youTubeTracks(*server, card.browseId, std::move(done));
+    }
+  }
+
+  std::string MusicWindow::cardCover(const std::string& url) {
+    if (url.empty()) {
+      return {};
+    }
+    if (const auto it = m_cardCovers.find(url); it != m_cardCovers.end()) {
+      return it->second;
+    }
+    const std::string big = ytCoverSize(url, 320);
+    gchar* sum = g_compute_checksum_for_string(G_CHECKSUM_MD5, big.c_str(), static_cast<gssize>(big.size()));
+    const fs::path target = m_library.coversDir() / (std::string("card-") + sum + ".jpg");
+    g_free(sum);
+    std::error_code ec;
+    if (fs::exists(target, ec)) {
+      return m_cardCovers[url] = target.string();
+    }
+    if (m_cardCoversPending.insert(url).second) {
+      m_online.downloadCover(big, target, [this, url, target](bool ok) {
+        m_cardCoversPending.erase(url);
+        if (ok) {
+          m_cardCovers[url] = target.string();
+          // Llegan muchas seguidas: se muestran en tandas, a lo sumo una reconstrucción cada 400 ms.
+          if (!m_coverRebuild.active()) m_coverRebuild.start(std::chrono::milliseconds(400), [this] {
+            if (!m_fullPlayer) { // el mismo temporizador que las carátulas de la biblioteca
               m_app.requestRebuild();
             }
           });
-        });
-      }
+        }
+      });
     }
+    return {};
+  }
+
+  std::unique_ptr<Node> MusicWindow::buildForYou(float width, float height, float scale) {
+    const float pad = Style::spaceLg * scale;
+    const float inner = std::max(0.0F, width - pad * 2.0F - 16.0F * scale);
+    const float cardW = 156.0F * scale;
+    const float gap = Style::spaceMd * scale;
+    const auto perRow = std::max<std::size_t>(1, static_cast<std::size_t>((inner + gap) / (cardW + gap)));
+    auto page = ui::column({.align = FlexAlign::Start, .gap = Style::spaceLg * scale, .padding = pad, .width = inner + pad * 2.0F});
+
+    const Server* youtube = youTubeServer();
+    auto header = ui::row({.align = FlexAlign::Center, .gap = Style::spaceSm * scale, .width = inner});
+    header->addChild(ui::label({.text = tr("apps.music.for-you.title"), .fontSize = Style::fontSizeHeader * scale, .fontWeight = FontWeight::SemiBold, .flexGrow = 1.0F}));
+    if (youtube != nullptr) {
+      header->addChild(ui::button({
+          .glyph = "refresh",
+          .enabled = !m_homeLoading,
+          .variant = ButtonVariant::Ghost,
+          .tooltip = tr("apps.music.for-you.refresh"),
+          .onClick = [this] { loadHome(true); },
+      }));
+    }
+    page->addChild(std::move(header));
+
+    struct CardData {
+      std::string cover;
+      std::string title;
+      std::string subtitle;
+      std::string key;
+      std::function<void()> click;
+    };
+    const auto card = [&](const CardData& data) {
+      auto box = ui::column({.align = FlexAlign::Start, .gap = 4.0F * scale, .width = cardW});
+      auto frame = ui::node({.width = cardW, .height = cardW});
+      auto cover = std::make_unique<CoverImage>();
+      cover->setSize(cardW, cardW);
+      cover->setCover(data.cover);
+      frame->addChild(std::move(cover));
+      if (!data.key.empty() && data.key == m_cardLoading) {
+        // Abriéndose: velo y ruedita sobre la carátula.
+        frame->addChild(ui::box({.fill = colorSpecFromRole(ColorRole::Surface, 0.6F), .width = cardW, .height = cardW}));
+        auto spin = ui::row({.align = FlexAlign::Center, .justify = FlexJustify::Center, .width = cardW, .height = cardW});
+        spin->addChild(ui::spinner({}));
+        frame->addChild(std::move(spin));
+      }
+      box->addChild(std::move(frame));
+      box->addChild(ui::label({.text = data.title, .fontSize = Style::fontSizeBody * scale, .fontWeight = FontWeight::SemiBold, .maxWidth = cardW, .maxLines = 1}));
+      box->addChild(ui::label({.text = data.subtitle, .fontSize = Style::fontSizeCaption * scale, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant), .maxWidth = cardW, .maxLines = 1}));
+      auto area = ui::inputArea({
+          .tooltip = data.title,
+          .onClick = [click = data.click](const InputArea::PointerData&) { click(); },
+      });
+      Node* content = area->addChild(std::move(box));
+      if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
+        content->layout(*renderer);
+        area->setSize(content->width(), content->height());
+      }
+      return area;
+    };
+    const auto shelf = [&](const std::string& title, const std::vector<CardData>& cards) {
+      if (cards.empty()) {
+        return;
+      }
+      const bool expanded = m_homeExpanded.contains(title);
+      auto column = ui::column({.align = FlexAlign::Start, .gap = Style::spaceSm * scale, .width = inner});
+      auto head = ui::row({.align = FlexAlign::Center, .width = inner});
+      head->addChild(ui::label({.text = title, .fontSize = Style::fontSizeTitle * scale, .fontWeight = FontWeight::SemiBold, .flexGrow = 1.0F}));
+      if (cards.size() > perRow) {
+        head->addChild(ui::button({
+            .text = expanded ? tr("apps.music.for-you.less") : tr("apps.music.for-you.all"),
+            .variant = ButtonVariant::Ghost,
+            .onClick =
+                [this, title] {
+                  if (!m_homeExpanded.erase(title)) {
+                    m_homeExpanded.insert(title);
+                  }
+                  m_app.requestRebuild();
+                },
+        }));
+      }
+      column->addChild(std::move(head));
+      const std::size_t shown = expanded ? cards.size() : std::min(cards.size(), perRow);
+      for (std::size_t first = 0; first < shown; first += perRow) {
+        auto row = ui::row({.align = FlexAlign::Start, .gap = gap});
+        for (std::size_t i = first; i < std::min(shown, first + perRow); ++i) {
+          row->addChild(card(cards[i]));
+        }
+        column->addChild(std::move(row));
+      }
+      page->addChild(std::move(column));
+    };
+    const auto note = [&](const std::string& text) {
+      page->addChild(ui::label({.text = text, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant), .maxWidth = inner}));
+    };
+
+    // YouTube Music: los estantes de su portada.
+    if (youtube != nullptr) {
+      if (!m_homeLoaded) {
+        loadHome(false);
+        page->addChild(ui::row({.align = FlexAlign::Center, .gap = Style::spaceSm * scale}, ui::spinner({}),
+                               ui::label({.text = tr("apps.music.for-you.loading"), .color = colorSpecFromRole(ColorRole::OnSurfaceVariant)})));
+      } else if (m_home.empty()) {
+        note(tr("apps.music.for-you.unavailable"));
+      }
+      for (const YtShelf& yt : m_home) {
+        std::vector<CardData> cards;
+        for (const YtCard& c : yt.cards) {
+          const std::string key = yt.title + "/" + c.videoId + c.browseId;
+          cards.push_back({cardCover(c.thumbnail), c.title, c.subtitle, key, [this, c, key] { playCard(c, key); }});
+        }
+        shelf(yt.title, cards);
+      }
+    } else {
+      note(tr("apps.music.for-you.connect"));
+    }
+
+    // De la biblioteca: lo último que llegó y álbumes para volver a escuchar (los mismos todo el día).
+    const auto albums = [&](const std::vector<std::size_t>& indices) {
+      std::vector<CardData> cards;
+      for (std::size_t a : indices) {
+        const Album& album = m_model.albums[a];
+        cards.push_back({album.cover, album.title.empty() ? tr("apps.music.unknown-album") : album.title, albumArtistName(album), {}, [this, a] {
+                           m_view = View::Albums;
+                           open({.kind = Detail::Kind::Album, .index = a});
+                         }});
+      }
+      return cards;
+    };
+    shelf(tr("apps.music.for-you.recent"), albums(recentAlbums(m_model, 24)));
+    const auto day = static_cast<std::uint32_t>(std::time(nullptr) / 86400);
+    shelf(tr("apps.music.for-you.rediscover"), albums(rediscoverAlbums(m_model, 24, day)));
+
+    auto scroll = ui::scrollView({
+        .state = &m_scroll[scrollKey(View::ForYou, 0, 0, false)],
+        .contentScale = scale,
+        .width = width,
+        .height = height,
+    });
+    scroll->content()->addChild(std::move(page));
+    return scroll;
+  }
+
+  // ── Servidores ────────────────────────────────────────────────────────────────────────────────────
+
+  void MusicWindow::syncServers() {
+    for (const Server& server : m_state.servers) {
+      syncServer(server.id);
+    }
+  }
+
+  void MusicWindow::syncServer(const std::string& id) {
+    const auto it = std::ranges::find(m_state.servers, id, &Server::id);
+    if (it == m_state.servers.end() || m_serverStatus[id] == ServerStatus::Syncing) {
+      return;
+    }
+    m_serverStatus[id] = ServerStatus::Syncing;
+    m_app.requestRebuild();
+    const Server server = *it;
+    m_remote->sync(server, [this, server](bool ok, std::vector<Track> tracks) {
+      if (!ok) {
+        // Sin red o error: se queda lo que ya había de ese servidor.
+        m_serverStatus[server.id] = ServerStatus::Failed;
+        m_app.requestRebuild();
+        return;
+      }
+      m_serverStatus[server.id] = ServerStatus::Ready;
+      m_serverCount[server.id] = tracks.size();
+      m_library.replaceRemote(remotePrefix(server), tracks);
+      setModel(m_library.load());
+      fetchMissingCovers();
+    });
+  }
+
+  void MusicWindow::removeServer(const std::string& id) {
+    const auto it = std::ranges::find(m_state.servers, id, &Server::id);
+    if (it == m_state.servers.end()) {
+      return;
+    }
+    m_library.replaceRemote(remotePrefix(*it), {});
+    m_remote->forget(id);
+    m_player.setYtdlCookies(m_remote->ytdlCookies());
+    m_streams->setCookies(m_remote->ytdlCookies());
+    m_home.clear();
+    m_homeLoaded = false;
+    m_state.servers.erase(it);
+    m_serverStatus.erase(id);
+    saveState();
+    setModel(m_library.load());
+  }
+
+  void MusicWindow::submitServer() {
+    ServerForm& form = m_serverForm;
+    if (form.busy) {
+      return;
+    }
+    Server server;
+    server.id = std::format("{:08x}", g_random_int());
+    server.kind = form.kind;
+    server.url = normalizeUrl(form.url);
+    server.user = form.user;
+    server.name = form.name.empty() ? server.url.substr(server.url.find("://") + 3) : form.name;
+    if (server.url.empty() || server.user.empty()) {
+      form.error = tr("apps.music.servers.missing");
+      m_app.requestRebuild();
+      return;
+    }
+    form.busy = true;
+    form.error.clear();
+    m_app.requestRebuild();
+    m_remote->connect(server, form.password, [this](bool ok, std::string error, Server connected) {
+      m_serverForm.busy = false;
+      if (!ok) {
+        m_serverForm.error = error == "unreachable" ? tr("apps.music.servers.unreachable")
+                                                    : tr("apps.music.servers.rejected", "error", error);
+        m_app.requestRebuild();
+        return;
+      }
+      m_serverForm = {};
+      m_dialog = Dialog::None;
+      m_state.servers.push_back(connected);
+      m_remote->setServers(m_state.servers);
+      saveState();
+      syncServer(connected.id);
+    });
   }
 
   std::unique_ptr<Node> MusicWindow::buildSourceList(SourceOrder& sources, bool lyrics, float width, float scale) {
@@ -2508,7 +3669,7 @@ namespace okaru::music {
   std::unique_ptr<Node> MusicWindow::buildSettings(float width, float height, float scale) {
     auto& settings = m_state.settings;
     const float pad = Style::spaceLg * scale;
-    const float inner = std::min(760.0F * scale, std::max(0.0F, width - pad * 2.0F - 16.0F * scale));
+    float inner = std::min(760.0F * scale, std::max(0.0F, width - pad * 2.0F - 16.0F * scale));
     auto page = ui::column({.align = FlexAlign::Stretch, .gap = Style::spaceMd * scale, .padding = pad, .width = inner + pad * 2.0F});
 
     const auto section = [&](const char* glyph, const char* key) {
@@ -2549,9 +3710,27 @@ namespace okaru::music {
     };
 
     page->addChild(ui::label({.text = tr("apps.music.settings.title"), .fontSize = Style::fontSizeHeader * scale, .fontWeight = FontWeight::SemiBold}));
+    // Cada sección en su tarjeta; las filas usan el ancho de adentro.
+    const float cardPad = Style::spaceMd * scale;
+    const float cardWidth = inner;
+    inner -= cardPad * 2.0F;
+    Flex* box = nullptr;
+    const auto card = [&](std::unique_ptr<Node> heading) {
+      auto column = ui::column({
+          .align = FlexAlign::Stretch,
+          .gap = Style::spaceMd * scale,
+          .padding = cardPad,
+          .fill = colorSpecFromRole(ColorRole::SurfaceContainerLow),
+          .radius = Style::spaceMd * scale,
+          .border = colorSpecFromRole(ColorRole::OutlineVariant, 0.6F),
+          .width = cardWidth,
+      });
+      column->addChild(std::move(heading));
+      box = static_cast<Flex*>(page->addChild(std::move(column)));
+    };
 
     // Biblioteca.
-    page->addChild(section("folder", "apps.music.settings.section.library"));
+    card(section("folder", "apps.music.settings.section.library"));
     for (std::size_t i = 0; i < m_state.folders.size(); ++i) {
       const fs::path& folder = m_state.folders[i];
       auto row = ui::row({
@@ -2570,7 +3749,7 @@ namespace okaru::music {
           .tooltip = tr("apps.music.remove-folder", "folder", folder.string()),
           .onClick = [this, i] { removeFolder(i); },
       }));
-      page->addChild(std::move(row));
+      box->addChild(std::move(row));
     }
     auto folderButtons = ui::row({.align = FlexAlign::Center, .gap = Style::spaceSm * scale});
     folderButtons->addChild(ui::button({.text = tr("apps.music.add-folder"), .glyph = "folder-plus", .variant = ButtonVariant::Outline, .onClick = [this] { addFolder(); }}));
@@ -2581,9 +3760,9 @@ namespace okaru::music {
         .variant = ButtonVariant::Ghost,
         .onClick = [this] { rescan(); },
     }));
-    page->addChild(std::move(folderButtons));
-    page->addChild(setting("apps.music.settings.scan-on-start", toggle(settings.scanOnStart)));
-    page->addChild(setting(
+    box->addChild(std::move(folderButtons));
+    box->addChild(setting("apps.music.settings.scan-on-start", toggle(settings.scanOnStart)));
+    box->addChild(setting(
         "apps.music.settings.rebuild",
         ui::button({
             .text = tr("apps.music.settings.rebuild.action"),
@@ -2599,8 +3778,101 @@ namespace okaru::music {
         })
     ));
 
+    // Servidores.
+    card(section("server", "apps.music.servers.title"));
+    box->addChild(ui::label({
+        .text = tr("apps.music.servers.hint"),
+        .fontSize = Style::fontSizeCaption * scale,
+        .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+        .maxWidth = inner,
+    }));
+    for (const Server& server : m_state.servers) {
+      auto row = ui::row({
+          .align = FlexAlign::Center,
+          .gap = Style::spaceSm * scale,
+          .paddingV = Style::spaceXs * scale,
+          .paddingH = Style::spaceSm * scale,
+          .fill = colorSpecFromRole(ColorRole::SurfaceContainerHigh),
+          .width = inner,
+      });
+      const auto status = m_serverStatus.contains(server.id) ? m_serverStatus.at(server.id) : ServerStatus::Idle;
+      const bool youtube = server.kind == ServerKind::YouTube;
+      std::string detail = server.kind == ServerKind::Jellyfin ? "Jellyfin" : youtube ? "YouTube Music" : "Subsonic";
+      if (status == ServerStatus::Syncing) {
+        detail = joinDot({detail, tr("apps.music.servers.syncing")});
+      } else if (status == ServerStatus::Failed) {
+        detail = joinDot({detail, tr("apps.music.servers.failed")});
+      } else if (status == ServerStatus::Ready) {
+        detail = joinDot({detail, trp("apps.music.song-count", static_cast<long>(m_serverCount[server.id]))});
+      }
+      auto text = ui::column({.align = FlexAlign::Start, .gap = 2.0F * scale, .flexGrow = 1.0F});
+      text->addChild(ui::label({.text = server.name, .fontSize = Style::fontSizeBody * scale, .fontWeight = FontWeight::SemiBold, .maxLines = 1}));
+      text->addChild(ui::label({
+          .text = youtube ? detail : joinDot({detail, server.user + " @ " + server.url}),
+          .fontSize = Style::fontSizeCaption * scale,
+          .color = colorSpecFromRole(status == ServerStatus::Failed ? ColorRole::Error : ColorRole::OnSurfaceVariant),
+          .maxWidth = std::max(120.0F * scale, inner - 160.0F * scale),
+          .maxLines = 1,
+          .ellipsize = TextEllipsize::Middle,
+      }));
+      row->addChild(ui::glyph({.glyph = youtube ? "brand-youtube" : "server", .glyphSize = 18.0F * scale, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant)}));
+      row->addChild(std::move(text));
+      if (youtube && status == ServerStatus::Failed) {
+        // La sesión venció o se cerró en Google: se vuelve a iniciar (el mismo servidor, sus canciones se quedan).
+        row->addChild(ui::button({
+            .glyph = "login",
+            .variant = ButtonVariant::Ghost,
+            .tooltip = tr("apps.music.youtube.relogin"),
+            .onClick =
+                [this] {
+                  m_ytForm = {.browsers = installedBrowsers()};
+                  openDialog(Dialog::YouTubeLogin);
+                },
+        }));
+      }
+      row->addChild(ui::button({
+          .glyph = "refresh",
+          .enabled = status != ServerStatus::Syncing,
+          .variant = ButtonVariant::Ghost,
+          .tooltip = tr("apps.music.servers.sync"),
+          .onClick = [this, id = server.id] { syncServer(id); },
+      }));
+      row->addChild(ui::button({
+          .glyph = "x",
+          .variant = ButtonVariant::Ghost,
+          .tooltip = tr("apps.music.servers.remove"),
+          .onClick = [this, id = server.id] { removeServer(id); },
+      }));
+      box->addChild(std::move(row));
+    }
+    const bool hasYouTube = std::ranges::contains(m_state.servers, ServerKind::YouTube, &Server::kind);
+    box->addChild(ui::row(
+        {.align = FlexAlign::Center, .gap = Style::spaceSm * scale},
+        ui::button({
+            .text = tr("apps.music.servers.add"),
+            .glyph = "plus",
+            .variant = ButtonVariant::Outline,
+            .onClick =
+                [this] {
+                  m_serverForm = {};
+                  openDialog(Dialog::AddServer);
+                },
+        }),
+        ui::button({
+            .text = tr("apps.music.youtube.connect"),
+            .glyph = "brand-youtube",
+            .variant = ButtonVariant::Outline,
+            .visible = !hasYouTube,
+            .onClick =
+                [this] {
+                  m_ytForm = {.browsers = installedBrowsers()};
+                  openDialog(Dialog::YouTubeLogin);
+                },
+        })
+    ));
+
     // Reproducción.
-    page->addChild(section("player-play", "apps.music.settings.section.playback"));
+    card(section("player-play", "apps.music.settings.section.playback"));
     auto fade = ui::row({.align = FlexAlign::Center, .gap = Style::spaceSm * scale});
     fade->addChild(ui::slider({
         .minValue = 0.0,
@@ -2628,10 +3900,11 @@ namespace okaru::music {
                                         : tr("apps.music.settings.crossfade.seconds", "seconds", settings.crossfade),
         .fontSize = Style::fontSizeCaption * scale,
         .minWidth = 80.0F * scale,
+        .textAlign = TextAlign::End,
     }));
-    page->addChild(setting("apps.music.settings.crossfade", std::move(fade)));
-    page->addChild(setting("apps.music.settings.gapless", toggle(settings.gapless, [this] { applySettings(); })));
-    page->addChild(setting(
+    box->addChild(setting("apps.music.settings.crossfade", std::move(fade)));
+    box->addChild(setting("apps.music.settings.gapless", toggle(settings.gapless, [this] { applySettings(); })));
+    box->addChild(setting(
         "apps.music.settings.replaygain",
         ui::select({
             .options = std::vector<std::string>{tr("apps.music.settings.replaygain.off"), tr("apps.music.settings.replaygain.track"),
@@ -2646,33 +3919,104 @@ namespace okaru::music {
                 },
         })
     ));
-    page->addChild(setting("apps.music.settings.resume", toggle(settings.resume)));
+    box->addChild(setting("apps.music.settings.resume", toggle(settings.resume)));
+
+    // Ecualizador.
+    card(section("adjustments-horizontal", "apps.music.settings.section.equalizer"));
+    box->addChild(setting("apps.music.settings.equalizer", toggle(settings.equalizer, [this] { applySettings(); })));
+    {
+      std::vector<std::string> presets;
+      std::size_t selected = kEqPresets.size(); // «personalizado»
+      for (std::size_t i = 0; i < kEqPresets.size(); ++i) {
+        presets.push_back(tr(std::string("apps.music.eq.") + kEqPresets[i].name));
+        if (kEqPresets[i].gains == settings.eqGains) {
+          selected = i;
+        }
+      }
+      presets.push_back(tr("apps.music.eq.custom"));
+      box->addChild(setting(
+          "apps.music.settings.eq-preset",
+          ui::select({
+              .options = std::move(presets),
+              .selectedIndex = selected,
+              .width = 170.0F * scale,
+              .onSelectionChanged =
+                  [this](std::size_t index, std::string_view) {
+                    if (index < kEqPresets.size()) {
+                      m_state.settings.eqGains = kEqPresets[index].gains;
+                      applySettings();
+                      saveState();
+                      m_app.requestRebuild();
+                    }
+                  },
+          })
+      ));
+      const auto gainText = [](double gain) { return std::format("{:+.0f} dB", gain); };
+      for (std::size_t band = 0; band < kEqBands.size(); ++band) {
+        const int hz = kEqBands[band];
+        auto row = ui::row({.align = FlexAlign::Center, .gap = Style::spaceSm * scale, .width = inner});
+        row->addChild(ui::label({
+            .text = hz >= 1000 ? std::format("{} kHz", hz / 1000) : std::format("{} Hz", hz),
+            .fontSize = Style::fontSizeCaption * scale,
+            .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+            .minWidth = 64.0F * scale,
+        }));
+        row->addChild(ui::slider({
+            .minValue = -kEqMaxGain,
+            .maxValue = kEqMaxGain,
+            .step = 1.0,
+            .value = settings.eqGains[band],
+            .flexGrow = 1.0F,
+            .onValueChanged =
+                [this, band, gainText](double value) {
+                  m_state.settings.eqGains[band] = value;
+                  applySettings();
+                  if (m_eqLabels[band] != nullptr) {
+                    m_eqLabels[band]->setText(gainText(value));
+                    m_app.invalidate();
+                  }
+                },
+            .onDragEnd =
+                [this] {
+                  saveState();
+                  m_app.requestRebuild(); // el preajuste pasa a «personalizado»
+                },
+        }));
+        row->addChild(ui::label({
+            .out = &m_eqLabels[band],
+            .text = gainText(settings.eqGains[band]),
+            .fontSize = Style::fontSizeCaption * scale,
+            .minWidth = 56.0F * scale,
+        }));
+        box->addChild(std::move(row));
+      }
+    }
 
     // Letras.
-    page->addChild(section("microphone-2", "apps.music.settings.section.lyrics"));
-    page->addChild(ui::label({
+    card(section("microphone-2", "apps.music.settings.section.lyrics"));
+    box->addChild(ui::label({
         .text = tr("apps.music.settings.lyrics.hint"),
         .fontSize = Style::fontSizeCaption * scale,
         .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
         .maxWidth = inner,
     }));
-    page->addChild(buildSourceList(settings.lyrics, true, inner, scale));
-    page->addChild(setting("apps.music.settings.prefer-synced", toggle(settings.preferSynced, [this] { m_lyricsItem.clear(); })));
+    box->addChild(buildSourceList(settings.lyrics, true, inner, scale));
+    box->addChild(setting("apps.music.settings.prefer-synced", toggle(settings.preferSynced, [this] { m_lyricsItem.clear(); })));
 
     // Carátulas.
-    page->addChild(section("photo", "apps.music.settings.section.covers"));
-    page->addChild(ui::label({
+    card(section("photo", "apps.music.settings.section.covers"));
+    box->addChild(ui::label({
         .text = tr("apps.music.settings.covers.hint"),
         .fontSize = Style::fontSizeCaption * scale,
         .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
         .maxWidth = inner,
     }));
-    page->addChild(buildSourceList(settings.covers, false, inner, scale));
-    page->addChild(setting(
+    box->addChild(buildSourceList(settings.covers, false, inner, scale));
+    box->addChild(setting(
         "apps.music.settings.covers.download",
         toggle(settings.covers.enabled[static_cast<std::size_t>(Source::Online)], [this] { fetchMissingCovers(); })
     ));
-    page->addChild(ui::label({
+    box->addChild(ui::label({
         .text = tr("apps.music.settings.privacy"),
         .fontSize = Style::fontSizeCaption * scale,
         .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
@@ -2685,7 +4029,10 @@ namespace okaru::music {
         .width = width,
         .height = height,
     });
-    scroll->content()->addChild(std::move(page));
+    // Centrada en el espacio libre (con ventanas anchas no queda pegada a la barra lateral).
+    auto centered = ui::row({.justify = FlexJustify::Center, .width = std::max(0.0F, width - 16.0F * scale)});
+    centered->addChild(std::move(page));
+    scroll->content()->addChild(std::move(centered));
     return scroll;
   }
 
@@ -2726,17 +4073,21 @@ namespace okaru::music {
     m_app.invalidate();
   }
 
-  void MusicWindow::openSongMenu(std::vector<std::string> paths, float x, float y, std::int64_t playlist, std::size_t index) {
+  void MusicWindow::openSongMenu(
+      std::vector<std::string> paths, float x, float y, std::int64_t playlist, std::size_t index, std::int64_t queueIndex
+  ) {
     if (paths.empty()) {
       return;
     }
     std::vector<MenuEntry> menu;
     menu.push_back({tr("apps.music.menu.play-next"), [this, paths] { m_player.playNext(paths); }});
     menu.push_back({tr("apps.music.menu.add-to-queue"), [this, paths] { m_player.append(paths); }});
+    if (youTubeServer() != nullptr && paths.size() == 1) {
+      menu.push_back({tr("apps.music.menu.radio"), [this, path = paths.front()] { startRadio(path); }});
+    }
     const bool liked = m_playlists.liked(paths.front());
     menu.push_back({liked ? tr("apps.music.menu.unlike") : tr("apps.music.like"), [this, path = paths.front()] { toggleLike(path); }});
     if (const auto it = m_byPath.find(paths.front()); it != m_byPath.end()) {
-      const Track& track = m_model.tracks[it->second];
       for (std::size_t a = 0; a < m_model.albums.size(); ++a) {
         if (std::ranges::contains(m_model.albums[a].tracks, it->second)) {
           menu.push_back({tr("apps.music.menu.go-to-album"), [this, a] {
@@ -2747,7 +4098,6 @@ namespace okaru::music {
           break;
         }
       }
-      (void)track;
     }
     menu.push_back({.separator = true});
     for (const Playlist& list : m_playlists.all()) {
@@ -2756,6 +4106,12 @@ namespace okaru::music {
       }
     }
     menu.push_back({tr("apps.music.menu.new-playlist"), [this, paths] { openDialog(Dialog::NewPlaylist, paths); }});
+    if (queueIndex >= 0) {
+      menu.push_back({.separator = true});
+      menu.push_back({tr("apps.music.menu.remove-from-queue"), [this, queueIndex] {
+                        m_player.removeAt(static_cast<std::size_t>(queueIndex));
+                      }});
+    }
     if (playlist != 0) {
       menu.push_back({.separator = true});
       menu.push_back({tr("apps.music.menu.remove-from-playlist"), [this, playlist, index] {
@@ -2766,6 +4122,30 @@ namespace okaru::music {
     m_menu = std::move(menu);
     m_menuX = x;
     m_menuY = y;
+    m_menuAbove = false;
+    m_app.requestRebuild();
+  }
+
+  void MusicWindow::openAddToPlaylist() {
+    const std::string item = m_player.currentItem();
+    if (currentTrack() == nullptr || m_addToButton == nullptr) {
+      return;
+    }
+    std::vector<MenuEntry> menu;
+    for (const Playlist& list : m_playlists.all()) {
+      if (!list.favorites) {
+        menu.push_back({tr("apps.music.menu.add-to", "name", list.name), [this, id = list.id, item] { m_playlists.add(id, {item}); }});
+      }
+    }
+    menu.push_back({tr("apps.music.menu.new-playlist"), [this, item] { openDialog(Dialog::NewPlaylist, {item}); }});
+    // Sobre el botón, hacia arriba (está en la barra de abajo).
+    float x = 0.0F;
+    float y = 0.0F;
+    Node::absolutePosition(m_addToButton, x, y);
+    m_menu = std::move(menu);
+    m_menuX = x;
+    m_menuY = y;
+    m_menuAbove = true;
     m_app.requestRebuild();
   }
 
@@ -2797,7 +4177,8 @@ namespace okaru::music {
     );
     const float menuHeight = ContextMenuControl::preferredHeight(entries, entries.size(), scale);
     const float x = std::clamp(m_menuX, 4.0F, std::max(4.0F, width - menuWidth - 4.0F));
-    const float y = std::clamp(m_menuY, 4.0F, std::max(4.0F, height - menuHeight - 4.0F));
+    const float wantedY = m_menuAbove ? m_menuY - menuHeight - 4.0F : m_menuY;
+    const float y = std::clamp(wantedY, 4.0F, std::max(4.0F, height - menuHeight - 4.0F));
     layer->addChild(ui::box({
         .fill = colorSpecFromRole(ColorRole::SurfaceContainerHigh),
         .border = colorSpecFromRole(ColorRole::OutlineVariant),
@@ -2874,6 +4255,16 @@ namespace okaru::music {
         .fill = colorSpecFromRole(ColorRole::SurfaceContainerHigh),
         .width = cardWidth,
     });
+    if (m_dialog == Dialog::AddServer || m_dialog == Dialog::YouTubeLogin) {
+      const float formWidth = cardWidth - Style::spaceLg * 2.0F * scale;
+      card->addChild(m_dialog == Dialog::AddServer ? buildServerForm(*card, formWidth, scale) : buildYouTubeForm(*card, formWidth, scale));
+      if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
+        card->layout(*renderer);
+      }
+      card->setPosition(std::round((width - cardWidth) * 0.5F), std::round((height - card->height()) * 0.4F));
+      layer->addChild(std::move(card));
+      return layer;
+    }
     card->addChild(ui::label({
         .text = m_dialog == Dialog::NewPlaylist ? tr("apps.music.playlist.new") : tr("apps.music.playlist.rename"),
         .fontSize = Style::fontSizeTitle * scale,
@@ -2910,6 +4301,162 @@ namespace okaru::music {
     return layer;
   }
 
+  std::unique_ptr<Node> MusicWindow::buildServerForm(Flex& card, float width, float scale) {
+    ServerForm& form = m_serverForm;
+    card.addChild(ui::label({.text = tr("apps.music.servers.add"), .fontSize = Style::fontSizeTitle * scale, .fontWeight = FontWeight::SemiBold}));
+    card.addChild(ui::select({
+        .options = std::vector<std::string>{"Jellyfin", tr("apps.music.servers.subsonic")},
+        .selectedIndex = form.kind == ServerKind::Jellyfin ? 0U : 1U,
+        .width = width,
+        .onSelectionChanged =
+            [this](std::size_t index, std::string_view) {
+              m_serverForm.kind = index == 0 ? ServerKind::Jellyfin : ServerKind::Subsonic;
+            },
+    }));
+    const auto field = [&](std::string& value, const char* placeholder, bool password, Input** out) {
+      card.addChild(ui::input({
+          .out = out,
+          .value = value,
+          .placeholder = tr(placeholder),
+          .passwordMode = password,
+          .width = width,
+          .onChange = [&value](const std::string& text) { value = text; },
+          .onSubmit = [this](const std::string&) { DeferredCall::callLater([this] { submitServer(); }); },
+      }));
+    };
+    field(form.url, "apps.music.servers.url", false, &m_dialogInput); // el primero recibe el foco
+    field(form.name, "apps.music.servers.name", false, nullptr);
+    field(form.user, "apps.music.servers.user", false, nullptr);
+    field(form.password, "apps.music.servers.password", true, nullptr);
+    if (!form.error.empty()) {
+      card.addChild(ui::label({
+          .text = form.error,
+          .fontSize = Style::fontSizeCaption * scale,
+          .color = colorSpecFromRole(ColorRole::Error),
+          .maxWidth = width,
+      }));
+    }
+    auto buttons = ui::row({.align = FlexAlign::Center, .justify = FlexJustify::End, .gap = Style::spaceSm * scale, .fillWidth = true});
+    if (form.busy) {
+      buttons->addChild(ui::spinner({}));
+    }
+    buttons->addChild(ui::button({
+        .text = tr("apps.music.cancel"),
+        .variant = ButtonVariant::Ghost,
+        .onClick =
+            [this] {
+              m_dialog = Dialog::None;
+              m_serverForm = {};
+              m_app.requestRebuild();
+            },
+    }));
+    buttons->addChild(ui::button({
+        .text = form.busy ? tr("apps.music.servers.connecting") : tr("apps.music.servers.connect"),
+        .enabled = !form.busy,
+        .variant = ButtonVariant::Primary,
+        .onClick = [this] { submitServer(); },
+    }));
+    return buttons;
+  }
+
+  std::unique_ptr<Node> MusicWindow::buildYouTubeForm(Flex& card, float width, float scale) {
+    YouTubeForm& form = m_ytForm;
+    const auto note = [&](const std::string& text, ColorRole role = ColorRole::OnSurfaceVariant) {
+      card.addChild(ui::label({.text = text, .fontSize = Style::fontSizeCaption * scale, .color = colorSpecFromRole(role), .maxWidth = width}));
+    };
+    card.addChild(ui::row(
+        {.align = FlexAlign::Center, .gap = Style::spaceSm * scale},
+        ui::glyph({.glyph = "brand-youtube", .glyphSize = 20.0F * scale, .color = colorSpecFromRole(ColorRole::Primary)}),
+        ui::label({.text = tr("apps.music.youtube.connect"), .fontSize = Style::fontSizeTitle * scale, .fontWeight = FontWeight::SemiBold})
+    ));
+    card.addChild(ui::label({.text = tr("apps.music.youtube.hint"), .fontSize = Style::fontSizeBody * scale, .maxWidth = width}));
+    if (form.browsers.empty()) {
+      note(tr("apps.music.youtube.no-browser"), ColorRole::Error);
+    } else {
+      std::vector<std::string> names;
+      for (const Browser& browser : form.browsers) {
+        names.push_back(browser.name);
+      }
+      card.addChild(ui::select({
+          .options = std::move(names),
+          .selectedIndex = std::min(form.browser, form.browsers.size() - 1),
+          .enabled = !form.waiting,
+          .width = width,
+          .onSelectionChanged = [this](std::size_t index, std::string_view) { m_ytForm.browser = index; },
+      }));
+    }
+    if (form.waiting) {
+      card.addChild(ui::row(
+          {.align = FlexAlign::Center, .gap = Style::spaceSm * scale},
+          ui::spinner({}),
+          ui::label({.text = tr("apps.music.youtube.waiting"), .fontSize = Style::fontSizeCaption * scale, .maxWidth = width - 40.0F * scale})
+      ));
+    }
+    if (!form.error.empty()) {
+      note(form.error, ColorRole::Error);
+    }
+    note(tr("apps.music.youtube.note"));
+    auto buttons = ui::row({.align = FlexAlign::Center, .justify = FlexJustify::End, .gap = Style::spaceSm * scale, .fillWidth = true});
+    buttons->addChild(ui::button({
+        .text = tr("apps.music.cancel"),
+        .variant = ButtonVariant::Ghost,
+        .onClick =
+            [this] {
+              m_ytLogin.cancel();
+              m_ytForm = {};
+              m_dialog = Dialog::None;
+              m_app.requestRebuild();
+            },
+    }));
+    buttons->addChild(ui::button({
+        .text = tr("apps.music.youtube.open"),
+        .glyph = "login",
+        .enabled = !form.browsers.empty() && !form.waiting,
+        .variant = ButtonVariant::Primary,
+        .onClick = [this] { startYouTubeLogin(); },
+    }));
+    return buttons;
+  }
+
+  void MusicWindow::startYouTubeLogin() {
+    YouTubeForm& form = m_ytForm;
+    if (form.waiting || form.browsers.empty()) {
+      return;
+    }
+    const Browser browser = form.browsers[std::min(form.browser, form.browsers.size() - 1)];
+    form.error.clear();
+    form.waiting = m_ytLogin.start(browser, [this](bool ok, std::string cookies, std::string error) {
+      m_ytForm.waiting = false;
+      if (!ok) {
+        m_ytForm.error = tr(error == "closed" ? "apps.music.youtube.closed" : "apps.music.youtube.timeout");
+        m_app.requestRebuild();
+        return;
+      }
+      // Volver a iniciar sesión reutiliza la cuenta que ya estaba (sus canciones, listas y origen siguen valiendo).
+      auto existing = std::ranges::find(m_state.servers, ServerKind::YouTube, &Server::kind);
+      if (existing == m_state.servers.end()) {
+        Server server{.id = std::format("{:08x}", g_random_int()), .kind = ServerKind::YouTube, .name = "YouTube Music", .url = "https://music.youtube.com"};
+        m_state.servers.push_back(server);
+        existing = std::prev(m_state.servers.end());
+      }
+      const Server server = *existing;
+      m_remote->setYouTubeSession(server, cookies);
+      m_player.setYtdlCookies(m_remote->ytdlCookies());
+      m_streams->setCookies(m_remote->ytdlCookies());
+      m_homeLoaded = false; // otra sesión: otra portada
+      m_serverStatus.erase(server.id);
+      saveState();
+      m_ytForm = {};
+      m_dialog = Dialog::None;
+      syncServer(server.id);
+      m_app.requestRebuild();
+    });
+    if (!form.waiting) {
+      form.error = tr("apps.music.youtube.launch", "browser", browser.name);
+    }
+    m_app.requestRebuild();
+  }
+
   bool MusicWindow::onKey(const KeyboardEvent& event) {
     if (!event.pressed || event.preedit) {
       return false;
@@ -2917,8 +4464,7 @@ namespace okaru::music {
     const bool ctrl = (event.modifiers & KeyMod::Ctrl) != 0;
     // Escribiendo en la búsqueda, las teclas sueltas son texto.
     const InputArea* focused = m_app.input().focusedArea();
-    const bool typing = (m_search != nullptr && focused == m_search->inputArea())
-        || (m_dialogInput != nullptr && focused == m_dialogInput->inputArea());
+    const bool typing = (m_search != nullptr && focused == m_search->inputArea()) || m_dialog != Dialog::None;
     switch (event.sym) {
     case XKB_KEY_q:
     case XKB_KEY_w:
@@ -2941,9 +4487,17 @@ namespace okaru::music {
       break; // sin Ctrl: «me gusta» (más abajo, si no se está escribiendo)
     case XKB_KEY_Escape:
       if (!m_menu.empty() || m_dialog != Dialog::None) {
+        if (m_dialog == Dialog::YouTubeLogin) {
+          m_ytLogin.cancel(); // cierra el navegador y borra el perfil
+          m_ytForm = {};
+        }
         m_menu.clear();
         m_dialog = Dialog::None;
         m_app.requestRebuild();
+        return true;
+      }
+      if (m_app.fullscreen()) {
+        setFullscreen(false);
         return true;
       }
       if (m_fullPlayer) {
@@ -2955,6 +4509,9 @@ namespace okaru::music {
         return true;
       }
       return false;
+    case XKB_KEY_F11:
+      setFullscreen(!m_app.fullscreen());
+      return true;
     case XKB_KEY_XF86AudioPlay:
       m_player.togglePause();
       return true;
@@ -2979,6 +4536,9 @@ namespace okaru::music {
       return true;
     case XKB_KEY_Right:
       m_player.seekBy(5.0);
+      return true;
+    case XKB_KEY_h: // «inicio»: Para ti
+      show(View::ForYou);
       return true;
     case XKB_KEY_n:
       m_player.next();

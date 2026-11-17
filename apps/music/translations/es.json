@@ -69,7 +69,8 @@
           "library": "Biblioteca",
           "playback": "Reproducción",
           "lyrics": "Letras",
-          "covers": "Carátulas"
+          "covers": "Carátulas",
+          "equalizer": "Ecualizador"
         },
         "scan-on-start": {
           "name": "Buscar cambios al abrir",
@@ -137,7 +138,15 @@
         },
         "move-up": "Más prioridad",
         "move-down": "Menos prioridad",
-        "privacy": "Las búsquedas en internet solo envían el artista, el álbum y el nombre de la canción. Las letras y carátulas quedan guardadas en tu equipo."
+        "privacy": "Las búsquedas en internet solo envían el artista, el álbum y el nombre de la canción. Las letras y carátulas quedan guardadas en tu equipo.",
+        "equalizer": {
+          "name": "Ecualizador",
+          "hint": "Ajusta graves, medios y agudos en 10 bandas."
+        },
+        "eq-preset": {
+          "name": "Preajuste",
+          "hint": "Moverlas a mano lo deja en «Personalizado»."
+        }
       },
       "playlists": "Listas",
       "favorites": "Favoritas",
@@ -160,7 +169,70 @@
         "go-to-album": "Ir al álbum",
         "add-to": "Agregar a «{name}»",
         "new-playlist": "Nueva lista con esta canción…",
-        "remove-from-playlist": "Quitar de esta lista"
+        "remove-from-playlist": "Quitar de esta lista",
+        "add-to-playlist": "Agregar a una lista",
+        "remove-from-queue": "Quitar de la cola",
+        "radio": "Iniciar radio"
+      },
+      "servers": {
+        "title": "Servidores",
+        "hint": "Escucha desde tu propio servidor Jellyfin o Subsonic (Navidrome, Gonic, Airsonic…). Sus canciones se suman a tu biblioteca; la música no se descarga. Contraseñas y tokens quedan en el llavero del sistema.",
+        "add": "Agregar servidor",
+        "sync": "Sincronizar ahora",
+        "remove": "Quitar servidor",
+        "subsonic": "Subsonic (Navidrome, Gonic…)",
+        "url": "Dirección del servidor (https://…)",
+        "name": "Nombre (opcional)",
+        "user": "Usuario",
+        "password": "Contraseña",
+        "connect": "Conectar",
+        "connecting": "Conectando…",
+        "syncing": "sincronizando…",
+        "failed": "no se pudo sincronizar",
+        "missing": "Escribe la dirección y el usuario.",
+        "unreachable": "No se pudo llegar al servidor. Revisa la dirección y tu conexión.",
+        "rejected": "El servidor rechazó el inicio de sesión ({error})."
+      },
+      "eq": {
+        "flat": "Plano",
+        "bass": "Más graves",
+        "treble": "Más agudos",
+        "vocal": "Voz",
+        "rock": "Rock",
+        "pop": "Pop",
+        "electronic": "Electrónica",
+        "custom": "Personalizado"
+      },
+      "fullscreen": "Pantalla completa (F11)",
+      "exit-fullscreen": "Salir de pantalla completa (Esc)",
+      "source": {
+        "all": "Todos los orígenes",
+        "local": "Este equipo"
+      },
+      "youtube": {
+        "connect": "Conectar YouTube Music",
+        "hint": "Se abrirá el navegador que elijas con un perfil nuevo y aislado, solo para iniciar sesión en Google. Tu contraseña se escribe ahí: Valandy nunca la ve. Al terminar, el navegador se cierra, el perfil se borra y solo las cookies de la sesión quedan en el llavero del sistema.",
+        "note": "YouTube Music no tiene una API pública: Valandy usa la de su web y reproduce con yt-dlp. Puede dejar de funcionar si YouTube la cambia.",
+        "open": "Abrir navegador",
+        "waiting": "Esperando a que inicies sesión en el navegador…",
+        "closed": "Se cerró el navegador antes de terminar de iniciar sesión.",
+        "timeout": "Pasó demasiado tiempo sin iniciar sesión. Vuelve a intentarlo.",
+        "launch": "No se pudo abrir {browser}.",
+        "no-browser": "No se encontró ningún navegador compatible (Zen, Firefox, LibreWolf, Chrome, Chromium, Brave o Vivaldi).",
+        "relogin": "Volver a iniciar sesión",
+        "results": "En YouTube Music",
+        "searching": "Buscando…"
+      },
+      "for-you": {
+        "title": "Para ti",
+        "refresh": "Actualizar recomendaciones",
+        "all": "Ver todo",
+        "less": "Ver menos",
+        "loading": "Cargando tus recomendaciones de YouTube Music…",
+        "unavailable": "No se pudieron cargar las recomendaciones de YouTube Music. Revisa la conexión o vuelve a iniciar sesión en Ajustes.",
+        "connect": "Conecta YouTube Music en Ajustes para recibir recomendaciones y mixes hechos para ti.",
+        "recent": "Agregados recientemente",
+        "rediscover": "Redescubre"
       }
     }
   }

@@ -38,7 +38,7 @@ namespace okaru::music {
       kLog.error("mpv_create failed");
       return;
     }
-    const std::array<std::pair<const char*, const char*>, 11> options{{
+    const std::array<std::pair<const char*, const char*>, 12> options{{
         {"vo", "null"},
         {"video", "no"},         // la portada incrustada no es un video
         {"audio-display", "no"}, // ni se decodifica como imagen
@@ -49,7 +49,10 @@ namespace okaru::music {
         {"prefetch-playlist", "yes"}, // abre la siguiente antes de que termine la actual
         {"gapless-audio", "weak"},
         {"volume-max", "100"},
-        {"ytdl", "no"}, // las URL de los servidores son flujos directos
+        // yt-dlp solo para las rutas "ytdl://" (YouTube Music): las URL de los servidores se abren directo (sin
+        // try_ytdl_first, el hook solo toma las "ytdl://" o las que mpv no pudo abrir).
+        {"ytdl", "yes"},
+        {"ytdl-format", "bestaudio/best"},
     }};
     for (const auto& [name, value] : options) {
       mpv_set_option_string(m_mpv, name, value);
@@ -126,10 +129,10 @@ namespace okaru::music {
   void AudioPlayer::surround(const std::vector<std::string>& before, const std::vector<std::string>& after) {
     command({"playlist-clear"}); // deja solo la que suena
     for (std::size_t i = 0; i < before.size(); ++i) {
-      command({"loadfile", before[i], "insert-at", std::to_string(i)});
+      command({"loadfile", playable(before[i]), "insert-at", std::to_string(i)});
     }
     for (const auto& item : after) {
-      command({"loadfile", item, "append"});
+      command({"loadfile", playable(item), "append"});
     }
   }
 
@@ -142,7 +145,7 @@ namespace okaru::music {
     const std::size_t first = m_shuffled ? 0 : start;
     int flag = paused ? 1 : 0;
     mpv_set_property_async(m_mpv, 0, "pause", MPV_FORMAT_FLAG, &flag);
-    command({"loadfile", order[first], "replace"});
+    command({"loadfile", playable(order[first]), "replace"});
     surround(
         {order.begin(), order.begin() + static_cast<std::ptrdiff_t>(first)},
         {order.begin() + static_cast<std::ptrdiff_t>(first) + 1, order.end()}
@@ -163,7 +166,7 @@ namespace okaru::music {
       return;
     }
     for (const auto& item : items) {
-      command({"loadfile", item, "append"});
+      command({"loadfile", playable(item), "append"});
       m_original.push_back(item);
     }
   }
@@ -175,16 +178,62 @@ namespace okaru::music {
     }
     // insert-next las pondría al revés si se insertan de a una: se insertan desde la última.
     for (auto it = items.rbegin(); it != items.rend(); ++it) {
-      command({"loadfile", *it, "insert-next"});
+      command({"loadfile", playable(*it), "insert-next"});
     }
     m_original.insert(m_original.end(), items.begin(), items.end());
   }
 
   void AudioPlayer::removeAt(std::size_t index) {
     if (index < m_state.queue.size()) {
-      std::erase(m_original, m_state.queue[index]);
+      // Solo una aparición: la misma canción puede estar dos veces en la cola.
+      if (const auto it = std::ranges::find(m_original, m_state.queue[index]); it != m_original.end()) {
+        m_original.erase(it);
+      }
       command({"playlist-remove", std::to_string(index)});
     }
+  }
+
+  void AudioPlayer::retryFailed(std::int64_t entryId) {
+    // YouTube: una URL directa que venció o se rechazó, o "ytdl://" pedido antes de que el script de yt-dlp de
+    // mpv terminara de cargar (al abrir la app). Se vuelve a cargar en su lugar, una vez, y sigue desde ahí.
+    std::int64_t count = 0;
+    mpv_get_property(m_mpv, "playlist-count", MPV_FORMAT_INT64, &count);
+    for (std::int64_t i = 0; i < count; ++i) {
+      std::int64_t id = -1;
+      mpv_get_property(m_mpv, std::format("playlist/{}/id", i).c_str(), MPV_FORMAT_INT64, &id);
+      if (id != entryId) {
+        continue;
+      }
+      char* name = mpv_get_property_string(m_mpv, std::format("playlist/{}/filename", i).c_str());
+      const std::string url = name != nullptr ? name : "";
+      mpv_free(name);
+      const auto item = m_itemOf.find(url);
+      const bool youtube = url.starts_with("ytdl://") || url.contains(".googlevideo.com/");
+      if (!youtube || item == m_itemOf.end() || !m_retried.insert(url).second) {
+        return;
+      }
+      if (m_onStreamFailed) {
+        m_onStreamFailed(url); // olvida la URL directa: el reintento va por yt-dlp
+      }
+      m_retryTimer.start(std::chrono::milliseconds(800), [this, index = static_cast<std::size_t>(i), path = item->second] {
+        if (index >= m_state.queue.size() || m_state.queue[index] != path) {
+          return; // la cola cambió mientras tanto
+        }
+        command({"loadfile", playable(path), "insert-at", std::to_string(index)});
+        command({"playlist-remove", std::to_string(index + 1)});
+        command({"playlist-play-index", std::to_string(index)}); // la pausa se respeta
+      });
+      return;
+    }
+  }
+
+  void AudioPlayer::refreshItem(std::size_t index) {
+    if (index >= m_state.queue.size() || static_cast<std::int64_t>(index) == m_state.current) {
+      return;
+    }
+    const std::string item = m_state.queue[index];
+    command({"loadfile", playable(item), "insert-at", std::to_string(index)});
+    command({"playlist-remove", std::to_string(index + 1)});
   }
 
   void AudioPlayer::clearQueue() {
@@ -317,6 +366,7 @@ namespace okaru::music {
         const auto* end = static_cast<mpv_event_end_file*>(event->data);
         if (end->reason == MPV_END_FILE_REASON_ERROR) {
           kLog.warn("mpv: {}", mpv_error_string(end->error));
+          retryFailed(end->playlist_entry_id);
         }
         break;
       }
@@ -346,8 +396,29 @@ namespace okaru::music {
   }
 
   void AudioPlayer::setReplayGain(int mode) {
+    m_replayGain = mode == 1 ? "track" : mode == 2 ? "album" : "no";
     if (m_mpv != nullptr) {
-      mpv_set_property_string(m_mpv, "replaygain", mode == 1 ? "track" : mode == 2 ? "album" : "no");
+      mpv_set_property_string(m_mpv, "replaygain", m_replayGain.c_str());
+    }
+  }
+
+  void AudioPlayer::setYtdlCookies(const std::string& file) {
+    m_ytdlRaw = file.empty() ? std::string() : "cookies=" + file;
+    if (m_mpv != nullptr) {
+      mpv_set_property_string(m_mpv, "ytdl-raw-options", m_ytdlRaw.c_str());
+    }
+  }
+
+  void AudioPlayer::setEqualizer(const EqGains* gains) {
+    std::string filter = gains != nullptr ? equalizerFilter(*gains) : std::string();
+    if (filter == m_filter) {
+      return;
+    }
+    m_filter = std::move(filter);
+    for (mpv_handle* handle : {m_mpv, m_tail}) {
+      if (handle != nullptr) {
+        mpv_set_property_string(handle, "af", m_filter.c_str());
+      }
     }
   }
 
@@ -367,15 +438,19 @@ namespace okaru::music {
     }
     const std::string volume = std::format("{:.1f}", s.volume);
     const std::string start = std::format("{:.3f}", s.position);
-    for (const auto& [name, value] : std::array<std::pair<const char*, std::string>, 8>{{
+    for (const auto& [name, value] : std::array<std::pair<const char*, std::string>, 12>{{
              {"vo", "null"},
              {"video", "no"},
              {"audio-display", "no"},
              {"terminal", "no"},
-             {"ytdl", "no"},
+             {"ytdl", "yes"},
+             {"ytdl-format", "bestaudio/best"},
+             {"ytdl-raw-options", m_ytdlRaw},
              {"volume", volume},
              {"mute", s.muted ? "yes" : "no"},
              {"start", start},
+             {"replaygain", m_replayGain},
+             {"af", m_filter},
          }}) {
       mpv_set_option_string(m_tail, name, value.c_str());
     }
@@ -384,7 +459,7 @@ namespace okaru::music {
       m_tail = nullptr;
       return;
     }
-    const std::string item = currentItem();
+    const std::string item = playable(currentItem());
     const char* load[] = {"loadfile", item.c_str(), nullptr};
     mpv_command_async(m_tail, 0, load);
     // La principal pasa ya a la siguiente, en silencio, y sube con el fundido.
@@ -448,10 +523,40 @@ namespace okaru::music {
         m_state.queue.reserve(static_cast<std::size_t>(list->num));
         for (int i = 0; i < list->num; ++i) {
           const auto* file = mapValue(list->values[i], "filename");
-          m_state.queue.emplace_back(file != nullptr && file->format == MPV_FORMAT_STRING ? file->u.string : "");
+          std::string entry = file != nullptr && file->format == MPV_FORMAT_STRING ? file->u.string : "";
+          if (const auto it = m_itemOf.find(entry); it != m_itemOf.end()) {
+            entry = it->second;
+          }
+          m_state.queue.push_back(std::move(entry));
         }
       }
     }
+  }
+
+  std::string AudioPlayer::playable(const std::string& item) {
+    std::string url = m_resolver ? m_resolver(item) : std::string();
+    if (url.empty()) {
+      return item;
+    }
+    m_itemOf[url] = item;
+    return url;
+  }
+
+  std::string equalizerFilter(const EqGains& gains) {
+    std::string graph;
+    double boost = 0.0;
+    for (std::size_t i = 0; i < gains.size(); ++i) {
+      const double gain = std::clamp(gains[i], -kEqMaxGain, kEqMaxGain);
+      if (std::abs(gain) < 0.05) {
+        continue;
+      }
+      boost = std::max(boost, gain);
+      graph += std::format(",equalizer=f={}:t=o:w=1:g={:.1f}", kEqBands[i], gain);
+    }
+    if (graph.empty()) {
+      return {};
+    }
+    return std::format("lavfi=[volume={:.1f}dB{}]", -boost, graph);
   }
 
   std::string formatTime(double seconds) {

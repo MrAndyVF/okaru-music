@@ -229,6 +229,35 @@ namespace okaru::music {
     );
   }
 
+  void OnlineService::downloadCover(std::string url, const fs::path& target, std::function<void(bool)> done) {
+    m_downloads.push_back({std::move(url), target, std::move(done)});
+    pumpDownloads();
+  }
+
+  void OnlineService::pumpDownloads() {
+    constexpr int kMaxDownloads = 4;
+    while (m_activeDownloads < kMaxDownloads && !m_downloads.empty()) {
+      Download next = std::move(m_downloads.front());
+      m_downloads.pop_front();
+      ++m_activeDownloads;
+      const fs::path raw = next.target.string() + ".download";
+      // Copia antes de mover `next` al lambda (download recibe un string_view de la URL).
+      const std::string url = next.url;
+      m_http.download(url, raw, [this, raw, next = std::move(next), alive = m_alive](bool ok) mutable {
+        if (!*alive) {
+          return;
+        }
+        --m_activeDownloads;
+        const bool stored = ok && storeCover(raw.string(), next.target);
+        std::error_code ec;
+        fs::remove(raw, ec);
+        // Sin marca de «no está»: un fallo puede ser solo falta de red; se reintenta en otra sesión.
+        next.done(stored);
+        pumpDownloads();
+      });
+    }
+  }
+
   void OnlineService::enqueueMusicBrainz(std::function<void()> request) {
     m_mbQueue.push_back(std::move(request));
     if (!m_mbTimer.active()) {
