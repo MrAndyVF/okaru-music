@@ -2,6 +2,40 @@
 
 Each version has an English and a Spanish section. / Cada versión tiene una sección en inglés y otra en español.
 
+## [1.1.0] - 2026-11-17
+
+### English
+
+#### Features
+- **Playlists by source.** With a source picked, the sidebar shows only that source's playlists, and new ones belong
+  to it. With «All sources» every playlist shows up with its source next to its name, and the ones created there mix
+  sources, with each song labeled with where it comes from. «Add to» only offers playlists that accept the song.
+- **One Favorites per source**: a like on a YouTube Music song goes to YouTube Music's Favorites, a local one to this
+  computer's. The single Favorites of 1.0.0 is split by source on first start.
+- The queue remembers title, artist, album, cover and length of YouTube Music songs that are not in the library.
+
+#### Changes
+- **Only YouTube Music songs**: music videos, channel uploads, episodes and unavailable (greyed out) items are left
+  out of sync, search, playlists and «For you», even when they are in your likes.
+- «For you» covers are downloaded at 544 px, sharp in the big player; the ones unused for 30 days are deleted.
+
+### Español
+
+#### Novedades
+- **Listas por origen.** Con un origen elegido, el panel lateral muestra solo sus listas, y las nuevas quedan en él.
+  Con «Todos» aparecen todas con su origen junto al nombre, y las que se crean ahí mezclan orígenes, con cada canción
+  marcada con el suyo. «Agregar a» solo ofrece las listas que aceptan la canción.
+- **Una Favoritas por origen**: el «me gusta» de una canción de YouTube Music va a la Favoritas de YouTube Music, y el
+  de una local, a la de este equipo. La Favoritas única de la 1.0.0 se reparte por origen al abrir.
+- La cola recuerda título, artista, álbum, carátula y duración de las canciones de YouTube Music que no están en la
+  biblioteca.
+
+#### Cambios
+- **Solo canciones de YouTube Music**: los videoclips, videos de canales, episodios y lo no disponible (en gris) quedan
+  fuera de la sincronización, la búsqueda, las listas y «Para ti», aunque estén en tus «me gusta».
+- Las carátulas de «Para ti» se descargan a 544 px, nítidas en el reproductor grande; las que no se usan en 30 días
+  se borran.
+
 ## [1.0.0] - 2026-11-16
 
 ### English
