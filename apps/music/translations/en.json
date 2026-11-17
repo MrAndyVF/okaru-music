@@ -203,7 +203,25 @@
         "custom": "Custom"
       },
       "fullscreen": "Fullscreen (F11)",
-      "exit-fullscreen": "Exit fullscreen (Esc)"
+      "exit-fullscreen": "Exit fullscreen (Esc)",
+      "source": {
+        "all": "All sources",
+        "local": "This computer"
+      },
+      "youtube": {
+        "connect": "Connect YouTube Music",
+        "hint": "The browser you pick opens with a new, isolated profile just to sign in to Google. You type your password there: Valandy never sees it. When you finish, the browser closes, the profile is deleted and only the session cookies are kept in the system keyring.",
+        "note": "YouTube Music has no public API: Valandy uses the one its website uses and plays through yt-dlp. It may stop working if YouTube changes it.",
+        "open": "Open browser",
+        "waiting": "Waiting for you to sign in in the browser…",
+        "closed": "The browser was closed before signing in.",
+        "timeout": "Signing in took too long. Try again.",
+        "launch": "Could not open {browser}.",
+        "no-browser": "No supported browser found (Zen, Firefox, LibreWolf, Chrome, Chromium, Brave or Vivaldi).",
+        "relogin": "Sign in again",
+        "results": "On YouTube Music",
+        "searching": "Searching…"
+      }
     }
   }
 }

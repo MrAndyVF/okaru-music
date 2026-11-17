@@ -203,7 +203,25 @@
         "custom": "Personalizado"
       },
       "fullscreen": "Pantalla completa (F11)",
-      "exit-fullscreen": "Salir de pantalla completa (Esc)"
+      "exit-fullscreen": "Salir de pantalla completa (Esc)",
+      "source": {
+        "all": "Todos los orígenes",
+        "local": "Este equipo"
+      },
+      "youtube": {
+        "connect": "Conectar YouTube Music",
+        "hint": "Se abrirá el navegador que elijas con un perfil nuevo y aislado, solo para iniciar sesión en Google. Tu contraseña se escribe ahí: Valandy nunca la ve. Al terminar, el navegador se cierra, el perfil se borra y solo las cookies de la sesión quedan en el llavero del sistema.",
+        "note": "YouTube Music no tiene una API pública: Valandy usa la de su web y reproduce con yt-dlp. Puede dejar de funcionar si YouTube la cambia.",
+        "open": "Abrir navegador",
+        "waiting": "Esperando a que inicies sesión en el navegador…",
+        "closed": "Se cerró el navegador antes de terminar de iniciar sesión.",
+        "timeout": "Pasó demasiado tiempo sin iniciar sesión. Vuelve a intentarlo.",
+        "launch": "No se pudo abrir {browser}.",
+        "no-browser": "No se encontró ningún navegador compatible (Zen, Firefox, LibreWolf, Chrome, Chromium, Brave o Vivaldi).",
+        "relogin": "Volver a iniciar sesión",
+        "results": "En YouTube Music",
+        "searching": "Buscando…"
+      }
     }
   }
 }

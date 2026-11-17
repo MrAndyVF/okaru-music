@@ -38,7 +38,7 @@ namespace okaru::music {
       kLog.error("mpv_create failed");
       return;
     }
-    const std::array<std::pair<const char*, const char*>, 11> options{{
+    const std::array<std::pair<const char*, const char*>, 12> options{{
         {"vo", "null"},
         {"video", "no"},         // la portada incrustada no es un video
         {"audio-display", "no"}, // ni se decodifica como imagen
@@ -49,7 +49,10 @@ namespace okaru::music {
         {"prefetch-playlist", "yes"}, // abre la siguiente antes de que termine la actual
         {"gapless-audio", "weak"},
         {"volume-max", "100"},
-        {"ytdl", "no"}, // las URL de los servidores son flujos directos
+        // yt-dlp solo para las rutas "ytdl://" (YouTube Music): las URL de los servidores se abren directo (sin
+        // try_ytdl_first, el hook solo toma las "ytdl://" o las que mpv no pudo abrir).
+        {"ytdl", "yes"},
+        {"ytdl-format", "bestaudio/best"},
     }};
     for (const auto& [name, value] : options) {
       mpv_set_option_string(m_mpv, name, value);
@@ -355,6 +358,13 @@ namespace okaru::music {
     }
   }
 
+  void AudioPlayer::setYtdlCookies(const std::string& file) {
+    m_ytdlRaw = file.empty() ? std::string() : "cookies=" + file;
+    if (m_mpv != nullptr) {
+      mpv_set_property_string(m_mpv, "ytdl-raw-options", m_ytdlRaw.c_str());
+    }
+  }
+
   void AudioPlayer::setEqualizer(const EqGains* gains) {
     std::string filter = gains != nullptr ? equalizerFilter(*gains) : std::string();
     if (filter == m_filter) {
@@ -384,12 +394,14 @@ namespace okaru::music {
     }
     const std::string volume = std::format("{:.1f}", s.volume);
     const std::string start = std::format("{:.3f}", s.position);
-    for (const auto& [name, value] : std::array<std::pair<const char*, std::string>, 10>{{
+    for (const auto& [name, value] : std::array<std::pair<const char*, std::string>, 12>{{
              {"vo", "null"},
              {"video", "no"},
              {"audio-display", "no"},
              {"terminal", "no"},
-             {"ytdl", "no"},
+             {"ytdl", "yes"},
+             {"ytdl-format", "bestaudio/best"},
+             {"ytdl-raw-options", m_ytdlRaw},
              {"volume", volume},
              {"mute", s.muted ? "yes" : "no"},
              {"start", start},

@@ -14,6 +14,7 @@
 #include "apps/music/online.h"
 #include "apps/music/playlists.h"
 #include "apps/music/servers.h"
+#include "apps/music/youtube.h"
 #include "ui/controls/scroll_view.h"
 
 #include <chrono>
@@ -103,6 +104,18 @@ namespace okaru::music {
     void removeServer(const std::string& id);
     void submitServer();
     [[nodiscard]] std::unique_ptr<Node> buildServerForm(Flex& card, float width, float scale);
+    // YouTube Music: inicio de sesión con un perfil aislado del navegador elegido.
+    [[nodiscard]] std::unique_ptr<Node> buildYouTubeForm(Flex& card, float width, float scale);
+    void startYouTubeLogin();
+    // Origen que se explora (ver MusicState::source).
+    void setSource(std::string source);
+    [[nodiscard]] bool inSource(const std::string& path) const;
+    [[nodiscard]] const Server* sourceServer() const;
+    // Búsqueda en el catálogo de YouTube Music (con el origen en YouTube Music).
+    void searchYouTube();
+    [[nodiscard]] std::unique_ptr<Node> buildItemTracks(std::vector<std::string> items, float scale);
+    // Carátula de una canción que suena y no está en la biblioteca (resultado de YouTube Music).
+    void fetchExtraCover(const std::string& item);
     [[nodiscard]] std::unique_ptr<Node> buildEmpty(float width, float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildTracks(std::vector<std::size_t> tracks, bool numbers, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildAlbums(std::vector<std::size_t> albums, float scale);
@@ -130,7 +143,7 @@ namespace okaru::music {
     );
     [[nodiscard]] std::unique_ptr<Node> buildMenu(float width, float height, float scale);
     // Diálogo con un nombre (nueva lista o renombrar).
-    enum class Dialog : std::uint8_t { None, NewPlaylist, RenamePlaylist, AddServer };
+    enum class Dialog : std::uint8_t { None, NewPlaylist, RenamePlaylist, AddServer, YouTubeLogin };
     void openDialog(Dialog dialog, std::vector<std::string> paths = {});
     void submitDialog();
     [[nodiscard]] std::unique_ptr<Node> buildDialog(float width, float height, float scale);
@@ -191,6 +204,18 @@ namespace okaru::music {
       bool busy = false;
     };
     ServerForm m_serverForm;
+    struct YouTubeForm {
+      std::vector<Browser> browsers;
+      std::size_t browser = 0;
+      bool waiting = false;
+      std::string error;
+    };
+    YouTubeForm m_ytForm;
+    YouTubeLogin m_ytLogin;
+    Timer m_ytSearchTimer;
+    std::string m_ytQuery;                // búsqueda cuyos resultados se muestran
+    std::vector<std::string> m_ytResults; // sus rutas ("yt://…")
+    bool m_ytSearching = false;
     Button* m_addToButton = nullptr;
     bool m_menuAbove = false; // el menú se abre hacia arriba (desde la barra de abajo)
     Model m_model;
@@ -198,6 +223,11 @@ namespace okaru::music {
     AudioPlayer m_player;
     std::unique_ptr<apps::PortalFileChooser> m_chooser;
     std::unordered_map<std::string, std::size_t> m_byPath; // ruta → índice en m_model.tracks
+    // Toda la biblioteca, aunque se explore un solo origen: la cola, la canción actual y las listas ven todo.
+    std::vector<Track> m_all;
+    std::unordered_map<std::string, std::size_t> m_allByPath;
+    std::unordered_map<std::string, Track> m_extraTracks; // resultados de YouTube Music fuera de la biblioteca
+    std::unordered_set<std::string> m_extraCovers;         // carátulas de esos resultados ya pedidas
 
     View m_view = View::Albums;
     Detail m_detail;

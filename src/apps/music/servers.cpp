@@ -2,9 +2,16 @@
 
 #include "apps/common/okaru_app.h"
 #include "apps/music/library.h"
+#include "apps/music/youtube.h"
 #include "core/log.h"
 
+#include <chrono>
+#include <ctime>
+#include <deque>
+#include <filesystem>
 #include <format>
+#include <fstream>
+#include <unordered_set>
 #include <glib.h>
 #include <libsecret/secret.h>
 #include <nlohmann/json.hpp>
@@ -18,6 +25,11 @@ namespace okaru::music {
     constexpr int kSubsonicPage = 500;
     constexpr const char* kClient = "Valandy";
     constexpr const char* kVersion = "1.0.0";
+    constexpr const char* kYtOrigin = "https://music.youtube.com";
+    constexpr const char* kYtClientVersion = "1.20251110.01.00";
+    constexpr const char* kYtUserAgent = "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0";
+    constexpr const char* kYtSongsOnly = "EgWKAQIIAWoQEAMQBBAJEAoQBRAREBAQFQ%3D%3D"; // filtro «Canciones» de la búsqueda
+    constexpr int kYtMaxPages = 200; // tope de páginas por sincronización (unas 20 000 canciones)
 
     const SecretSchema* schema() {
       static const SecretSchema kSchema = {
@@ -118,10 +130,13 @@ namespace okaru::music {
   } // namespace
 
   std::string remotePrefix(const Server& server) {
-    return (server.kind == ServerKind::Jellyfin ? "jf://" : "sub://") + server.id + "/";
+    const char* scheme = server.kind == ServerKind::Jellyfin ? "jf://" : server.kind == ServerKind::Subsonic ? "sub://" : "yt://";
+    return scheme + server.id + "/";
   }
 
-  bool isRemote(const std::string& path) { return path.starts_with("jf://") || path.starts_with("sub://"); }
+  bool isRemote(const std::string& path) {
+    return path.starts_with("jf://") || path.starts_with("sub://") || path.starts_with("yt://");
+  }
 
   std::string normalizeUrl(std::string url) {
     url.erase(0, url.find_first_not_of(" \t"));
@@ -189,6 +204,15 @@ namespace okaru::music {
 
   // ── Servidores ───────────────────────────────────────────────────────────────────────────────────
 
+  struct RemoteSources::YtSync {
+    Server server;
+    SyncFn done;
+    std::deque<std::string> pending;
+    std::vector<Track> tracks;
+    std::unordered_set<std::string> seen;
+    int pages = 0;
+  };
+
   RemoteSources::RemoteSources(apps::OkaruApp& app, std::string deviceId) : m_deviceId(std::move(deviceId)) {
     app.addPollSource(&m_source);
   }
@@ -204,6 +228,7 @@ namespace okaru::music {
         m_secrets[server.id] = loadSecret(server.id);
       }
     }
+    writeYtdlCookies();
   }
 
   const Server* RemoteSources::find(const std::string& id) const {
@@ -284,6 +309,15 @@ namespace okaru::music {
 
   void RemoteSources::sync(const Server& server, SyncFn done) {
     auto out = std::make_shared<std::vector<Track>>();
+    if (server.kind == ServerKind::YouTube) {
+      // «Me gusta», luego las listas y los álbumes guardados (sus ids se agregan a la fila al leerlos).
+      auto sync = std::make_shared<YtSync>();
+      sync->server = server;
+      sync->done = std::move(done);
+      sync->pending = {"FEmusic_liked_videos", "FEmusic_liked_playlists", "FEmusic_liked_albums"};
+      ytNext(std::move(sync));
+      return;
+    }
     if (server.kind == ServerKind::Jellyfin) {
       syncJellyfin(server, out, 0, std::move(done));
     } else {
@@ -423,6 +457,10 @@ namespace okaru::music {
     RemoteRef ref;
     const Server* server = parseRemote(path, ref) ? find(ref.server) : nullptr;
     const auto secret = server != nullptr ? m_secrets.find(server->id) : m_secrets.end();
+    if (server != nullptr && server->kind == ServerKind::YouTube) {
+      // Lo resuelve yt-dlp dentro de mpv (con las cookies de la sesión, si hay).
+      return "ytdl://https://music.youtube.com/watch?v=" + ref.item;
+    }
     if (server == nullptr || secret == m_secrets.end() || secret->second.empty()) {
       return {};
     }
@@ -440,6 +478,14 @@ namespace okaru::music {
       return {};
     }
     const std::string& id = ref.album != "_" ? ref.album : ref.item;
+    if (server->kind == ServerKind::YouTube) {
+      for (const std::string& key : {ref.item, ref.album}) {
+        if (const auto it = m_thumbs.find(key); it != m_thumbs.end() && !it->second.empty()) {
+          return ytCoverSize(it->second, 544);
+        }
+      }
+      return "https://i.ytimg.com/vi/" + ref.item + "/hqdefault.jpg"; // sin la de la sincronización (otra sesión)
+    }
     if (server->kind == ServerKind::Jellyfin) {
       return std::format("{}/Items/{}/Images/Primary?maxHeight=512&quality=90", server->url, id);
     }
@@ -450,6 +496,181 @@ namespace okaru::music {
     m_secrets.erase(serverId);
     forgetSecret(serverId);
     std::erase_if(m_servers, [&](const Server& s) { return s.id == serverId; });
+    writeYtdlCookies();
+  }
+
+  // ── YouTube Music ─────────────────────────────────────────────────────────────────────────────────
+
+  void RemoteSources::setYouTubeSession(const Server& server, const std::string& cookies) {
+    m_secrets[server.id] = cookies;
+    saveSecret(server.id, "Valandy: " + server.name, cookies);
+    if (!std::ranges::contains(m_servers, server.id, &Server::id)) {
+      m_servers.push_back(server);
+    }
+    writeYtdlCookies();
+  }
+
+  void RemoteSources::writeYtdlCookies() {
+    // Las de la primera cuenta con sesión; el archivo vive en XDG_RUNTIME_DIR (memoria, solo del usuario).
+    namespace fs = std::filesystem;
+    const fs::path file = fs::path(g_get_user_runtime_dir()) / "okaru-music" / "yt-cookies.txt";
+    std::error_code ec;
+    for (const Server& server : m_servers) {
+      const auto secret = m_secrets.find(server.id);
+      if (server.kind != ServerKind::YouTube || secret == m_secrets.end() || !hasYouTubeSession(secret->second)) {
+        continue;
+      }
+      fs::create_directories(file.parent_path(), ec);
+      fs::permissions(file.parent_path(), fs::perms::owner_all, ec);
+      {
+        std::ofstream out(file, std::ios::trunc);
+        fs::permissions(file, fs::perms::owner_read | fs::perms::owner_write, ec);
+        out << netscapeCookies(secret->second);
+      }
+      m_ytdlCookies = file.string();
+      return;
+    }
+    fs::remove(file, ec);
+    m_ytdlCookies.clear();
+  }
+
+  void RemoteSources::ytRequest(
+      const Server& server, const std::string& endpoint, const std::string& extra, nlohmann::json body,
+      std::function<void(bool ok, nlohmann::json response)> done
+  ) {
+    const char* const* languages = g_get_language_names();
+    const std::string hl = languages != nullptr && languages[0] != nullptr ? std::string(languages[0]).substr(0, 2) : "en";
+    body["context"]["client"] = {{"clientName", "WEB_REMIX"}, {"clientVersion", kYtClientVersion}, {"hl", hl == "C" ? "en" : hl}};
+    std::vector<std::string> headers{
+        "Content-Type: application/json", std::string("Origin: ") + kYtOrigin, std::string("X-Origin: ") + kYtOrigin,
+        std::string("Referer: ") + kYtOrigin + "/", std::string("User-Agent: ") + kYtUserAgent, "X-Goog-AuthUser: 0",
+    };
+    if (const auto secret = m_secrets.find(server.id); secret != m_secrets.end() && hasYouTubeSession(secret->second)) {
+      headers.push_back("Cookie: " + secret->second);
+      headers.push_back("Authorization: " + sapisidAuthorization(secret->second, static_cast<long long>(std::time(nullptr))));
+    }
+    m_http.request(
+        {.method = "POST",
+         .url = std::format("{}/youtubei/v1/{}?prettyPrint=false{}", kYtOrigin, endpoint, extra),
+         .headers = std::move(headers),
+         .body = body.dump(),
+         .followRedirects = true},
+        [done = std::move(done), alive = m_alive](HttpResponse r) {
+          if (!*alive) {
+            return;
+          }
+          auto json = nlohmann::json::parse(r.body, nullptr, false);
+          const bool ok = r.transportOk && r.status == 200 && json.is_object();
+          if (!ok) {
+            kLog.warn("youtube music: HTTP {}", r.status);
+          }
+          done(ok, ok ? std::move(json) : nlohmann::json());
+        }
+    );
+  }
+
+  Track RemoteSources::ytTrack(const Server& server, const YtTrack& yt) {
+    Track t;
+    t.path = remotePrefix(server) + (yt.albumId.empty() ? "_" : yt.albumId) + "/" + yt.videoId;
+    t.title = yt.title;
+    t.artist = yt.artist;
+    t.albumArtist = yt.artist.substr(0, yt.artist.find(", ")); // el álbum se agrupa por el primer artista
+    t.album = yt.album;
+    t.duration = yt.duration;
+    if (!yt.thumbnail.empty()) {
+      m_thumbs[yt.videoId] = yt.thumbnail;
+      if (!yt.albumId.empty()) {
+        m_thumbs.try_emplace(yt.albumId, yt.thumbnail);
+      }
+    }
+    return t;
+  }
+
+  void RemoteSources::ytNext(std::shared_ptr<YtSync> sync) {
+    if (sync->pending.empty()) {
+      auto done = std::move(sync->done);
+      done(true, std::move(sync->tracks));
+      return;
+    }
+    std::string id = std::move(sync->pending.front());
+    sync->pending.pop_front();
+    ytBrowse(std::move(sync), std::move(id), {}, true, 0);
+  }
+
+  void RemoteSources::ytBrowse(std::shared_ptr<YtSync> sync, std::string browseId, std::string token, bool tokenInBody, int page) {
+    nlohmann::json body = nlohmann::json::object();
+    std::string extra;
+    if (token.empty()) {
+      body["browseId"] = browseId;
+    } else if (tokenInBody) {
+      body["continuation"] = token;
+    } else {
+      extra = std::format("&ctoken={0}&continuation={0}&type=next", token);
+    }
+    const Server server = sync->server;
+    ytRequest(server, "browse", extra, std::move(body), [this, sync, browseId, page](bool ok, nlohmann::json response) mutable {
+      ++sync->pages;
+      if (!ok) {
+        // Sin la primera página de «me gusta» la sesión no sirve: se avisa. Lo demás se salta.
+        if (browseId == "FEmusic_liked_videos" && page == 0) {
+          auto done = std::move(sync->done);
+          done(false, {});
+          return;
+        }
+        ytNext(std::move(sync));
+        return;
+      }
+      if (browseId == "FEmusic_liked_playlists" || browseId == "FEmusic_liked_albums") {
+        const bool playlists = browseId == "FEmusic_liked_playlists";
+        for (std::string& id : parseYtShelfIds(response, playlists ? "VL" : "MPREb")) {
+          if (id != "VLLM") { // «Música que me gusta»: ya está en FEmusic_liked_videos
+            sync->pending.push_back(std::move(id));
+          }
+        }
+      } else {
+        // En un álbum las filas no traen artista, álbum ni carátula: van las del encabezado.
+        const bool album = browseId.starts_with("MPREb");
+        const YtHeader header = album && page == 0 ? parseYtHeader(response) : YtHeader{};
+        for (YtTrack& yt : parseYtTracks(response)) {
+          if (album) {
+            if (!header.title.empty()) {
+              yt.album = header.title;
+              yt.albumId = browseId;
+            }
+            if (!yt.artistLinked && !header.artist.empty()) {
+              yt.artist = header.artist;
+            }
+            if (yt.thumbnail.empty()) {
+              yt.thumbnail = header.thumbnail;
+            }
+          }
+          if (sync->seen.insert(yt.videoId).second) {
+            sync->tracks.push_back(ytTrack(sync->server, yt));
+          }
+        }
+      }
+      const YtContinuation next = parseYtContinuation(response);
+      if (!next.token.empty() && sync->pages < kYtMaxPages) {
+        ytBrowse(std::move(sync), browseId, next.token, next.inBody, page + 1);
+      } else {
+        ytNext(std::move(sync));
+      }
+    });
+  }
+
+  void RemoteSources::searchYouTube(const Server& server, const std::string& query, SearchFn done) {
+    ytRequest(
+        server, "search", "", {{"query", query}, {"params", kYtSongsOnly}},
+        [this, server, done = std::move(done)](bool ok, nlohmann::json response) {
+          std::vector<Track> tracks;
+          if (ok) {
+            for (const YtTrack& yt : parseYtTracks(response)) {
+              tracks.push_back(ytTrack(server, yt));
+            }
+          }
+          done(std::move(tracks));
+        }
+    );
   }
 
 } // namespace okaru::music

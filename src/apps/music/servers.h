@@ -9,6 +9,8 @@
 #include "net/http_client.h"
 #include "net/http_client_poll_source.h"
 
+#include <nlohmann/json_fwd.hpp>
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -24,7 +26,8 @@ namespace okaru::music {
 
   struct Track;
 
-  enum class ServerKind : std::uint8_t { Jellyfin, Subsonic };
+  // YouTube Music se trata como un servidor más: su «secreto» son las cookies de la sesión (ver youtube.h).
+  enum class ServerKind : std::uint8_t { Jellyfin, Subsonic, YouTube };
 
   struct Server {
     std::string id; // propio, estable (forma parte de las rutas de sus canciones)
@@ -57,6 +60,7 @@ namespace okaru::music {
   public:
     using ConnectFn = std::function<void(bool ok, std::string error, Server server)>;
     using SyncFn = std::function<void(bool ok, std::vector<Track> tracks)>;
+    using SearchFn = std::function<void(std::vector<Track> tracks)>;
 
     RemoteSources(apps::OkaruApp& app, std::string deviceId);
     ~RemoteSources();
@@ -75,6 +79,12 @@ namespace okaru::music {
     // Carátula del álbum (o de la pista) en el servidor.
     [[nodiscard]] std::string coverUrl(const std::string& path) const;
     void forget(const std::string& serverId);
+    // YouTube Music: guarda las cookies de una sesión recién iniciada (llavero y memoria).
+    void setYouTubeSession(const Server& server, const std::string& cookies);
+    // Canciones del catálogo de YouTube Music (no solo de la biblioteca).
+    void searchYouTube(const Server& server, const std::string& query, SearchFn done);
+    // Archivo de cookies para yt-dlp (en XDG_RUNTIME_DIR, solo del usuario); vacío sin sesión.
+    [[nodiscard]] const std::string& ytdlCookies() const noexcept { return m_ytdlCookies; }
 
   private:
     [[nodiscard]] const Server* find(const std::string& id) const;
@@ -86,6 +96,13 @@ namespace okaru::music {
         const Server& server, std::shared_ptr<std::vector<Track>> out, std::shared_ptr<std::vector<std::string>> albums,
         int offset, SyncFn done
     );
+    struct YtSync;
+    void ytRequest(const Server& server, const std::string& endpoint, const std::string& extra, nlohmann::json body,
+                   std::function<void(bool ok, nlohmann::json response)> done);
+    void ytNext(std::shared_ptr<YtSync> sync);
+    void ytBrowse(std::shared_ptr<YtSync> sync, std::string browseId, std::string token, bool tokenInBody, int page);
+    [[nodiscard]] Track ytTrack(const Server& server, const struct YtTrack& yt);
+    void writeYtdlCookies();
     void syncSubsonicAlbum(
         const Server& server, std::shared_ptr<std::vector<Track>> out, std::shared_ptr<std::vector<std::string>> albums,
         std::size_t index, SyncFn done
@@ -95,7 +112,9 @@ namespace okaru::music {
     HttpClientPollSource m_source{m_http};
     std::string m_deviceId;
     std::vector<Server> m_servers;
-    std::unordered_map<std::string, std::string> m_secrets; // id → token o contraseña (en memoria)
+    std::unordered_map<std::string, std::string> m_secrets; // id → token, contraseña o cookies (en memoria)
+    std::unordered_map<std::string, std::string> m_thumbs;  // YouTube: videoId o albumId → URL de la carátula
+    std::string m_ytdlCookies;
     std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);
   };
 

@@ -56,6 +56,7 @@ namespace okaru::music {
     Settings settings;
     std::vector<Server> servers; // sin secretos: esos van al llavero
     std::string deviceId;        // identifica esta instalación ante Jellyfin
+    std::string source;          // origen que se explora: "" todos, "local" este equipo, o el id de un servidor
   };
 
   [[nodiscard]] std::filesystem::path statePath();

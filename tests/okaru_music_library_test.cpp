@@ -5,6 +5,7 @@
 #include "apps/music/music_state.h"
 #include "apps/music/playlists.h"
 #include "apps/music/servers.h"
+#include "apps/music/youtube.h"
 #include "core/deferred_call.h"
 
 #include <algorithm>
@@ -13,6 +14,10 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <glib.h>
+#include <nlohmann/json.hpp>
+#include <openssl/evp.h>
+#include <sqlite3.h>
 #include <thread>
 #include <unistd.h>
 
@@ -260,6 +265,95 @@ namespace {
     assert(dominantColors({}, 5).empty());
   }
 
+  void testYouTube() {
+    // Filas como las de InnerTube: búsqueda (artista • álbum • duración en una columna), «me gusta» (artista y
+    // álbum en columnas, duración fija) y un artista (sin videoId: no es canción). La miniatura sale grande.
+    const auto run = [](const std::string& text, const std::string& type = "", const std::string& id = "") {
+      nlohmann::json r{{"text", text}};
+      if (!type.empty()) {
+        r["navigationEndpoint"]["browseEndpoint"] = {
+            {"browseId", id},
+            {"browseEndpointContextSupportedConfigs", {{"browseEndpointContextMusicConfig", {{"pageType", type}}}}}};
+      }
+      return r;
+    };
+    const auto col = [](nlohmann::json runs) {
+      return nlohmann::json{{"musicResponsiveListItemFlexColumnRenderer", {{"text", {{"runs", std::move(runs)}}}}}};
+    };
+    const nlohmann::json response{{"contents", {
+        {{"musicResponsiveListItemRenderer", {
+            {"playlistItemData", {{"videoId", "217Bw85-5cw"}}},
+            {"thumbnail", {{"musicThumbnailRenderer", {{"thumbnail", {{"thumbnails", {{{"url", "https://x/a=w60-h60-l90-rj"}}, {{"url", "https://x/a=w120-h120-l90-rj"}}}}}}}}}},
+            {"flexColumns", {col({run("Adiós")}),
+                             col({run("Gustavo Cerati", "MUSIC_PAGE_TYPE_ARTIST", "UC1"), run(" • "),
+                                  run("Ahí Vamos", "MUSIC_PAGE_TYPE_ALBUM", "MPREb_1"), run(" • "), run("3:54")})}}}}},
+        {{"musicResponsiveListItemRenderer", {
+            {"flexColumns", {col({{{"text", "Afuera"}, {"navigationEndpoint", {{"watchEndpoint", {{"videoId", "abcdefghijk"}}}}}}}),
+                             col({run("Caifanes", "MUSIC_PAGE_TYPE_ARTIST", "UC2"), run(" & "), run("Saúl", "MUSIC_PAGE_TYPE_ARTIST", "UC3")}),
+                             col({run("El Nervio Del Volcán", "MUSIC_PAGE_TYPE_ALBUM", "MPREb_2")})}},
+            {"fixedColumns", {{{"musicResponsiveListItemFixedColumnRenderer", {{"text", {{"runs", {run("1:02:03")}}}}}}}}}}}},
+        {{"musicResponsiveListItemRenderer", {{"flexColumns", {col({run("Gustavo Cerati", "MUSIC_PAGE_TYPE_ARTIST", "UC1")})}}}}},
+        {{"continuationItemRenderer", {{"continuationEndpoint", {{"continuationCommand", {{"token", "TOKEN"}}}}}}}},
+    }}};
+    const auto tracks = parseYtTracks(response);
+    assert(tracks.size() == 2);
+    assert(tracks[0].videoId == "217Bw85-5cw" && tracks[0].title == "Adiós" && tracks[0].artist == "Gustavo Cerati");
+    assert(tracks[0].album == "Ahí Vamos" && tracks[0].albumId == "MPREb_1" && tracks[0].duration == 234.0);
+    assert(ytCoverSize(tracks[0].thumbnail, 544) == "https://x/a=w544-h544-l90-rj");
+    assert(tracks[1].videoId == "abcdefghijk" && tracks[1].artist == "Caifanes, Saúl" && tracks[1].duration == 3723.0);
+    assert(parseYtContinuation(response).token == "TOKEN" && parseYtContinuation(response).inBody);
+    assert(parseYtDuration("12 M reproducciones") == 0.0);
+
+    // Cookies: lectura, sesión iniciada, firma y formato para yt-dlp.
+    const std::string header = "VISITOR=v; SID=s; SAPISID=abc; __Secure-3PAPISID=def";
+    assert(cookieValue(header, "SAPISID") == "abc" && cookieValue(header, "SID") == "s" && cookieValue(header, "X").empty());
+    assert(hasYouTubeSession(header) && !hasYouTubeSession("VISITOR=v"));
+    gchar* sha = g_compute_checksum_for_string(G_CHECKSUM_SHA1, "1700000000 abc https://music.youtube.com", -1);
+    const std::string auth = sapisidAuthorization(header, 1700000000);
+    assert(auth.starts_with(std::string("SAPISIDHASH 1700000000_") + sha) && auth.contains(" SAPISID3PHASH 1700000000_"));
+    g_free(sha);
+    assert(netscapeCookies("A=1; B=x=y").contains("\tA\t1\n") && netscapeCookies("A=1; B=x=y").contains("\tB\tx=y\n"));
+
+    // Perfil de Firefox simulado: solo las de youtube.com, sin repetir (gana el dominio general).
+    const fs::path profile = fs::temp_directory_path() / ("okaru-music-ff-" + std::to_string(::getpid()));
+    fs::create_directories(profile / "Default");
+    sqlite3* db = nullptr;
+    sqlite3_open((profile / "cookies.sqlite").c_str(), &db);
+    sqlite3_exec(db, "CREATE TABLE moz_cookies(host TEXT, name TEXT, value TEXT);"
+                     "INSERT INTO moz_cookies VALUES('.youtube.com','SID','s'),('music.youtube.com','SID','other'),"
+                     "('.google.com','SAPISID','g'),('.youtube.com','SAPISID','y');", nullptr, nullptr, nullptr);
+    sqlite3_close(db);
+    assert(readFirefoxCookies(profile) == "SID=s; SAPISID=y");
+
+    // Chromium con --password-store=basic: AES-128-CBC con la clave de «peanuts», prefijo v10 y (versión ≥ 24) el
+    // SHA-256 del dominio delante del valor.
+    unsigned char key[16];
+    PKCS5_PBKDF2_HMAC_SHA1("peanuts", 7, reinterpret_cast<const unsigned char*>("saltysalt"), 9, 1, 16, key);
+    unsigned char iv[16];
+    std::fill(std::begin(iv), std::end(iv), ' ');
+    const std::string plain = std::string(32, 'h') + "secret-sid";
+    std::string cipher(plain.size() + 16, '\0');
+    int n1 = 0, n2 = 0;
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), nullptr, key, iv);
+    EVP_EncryptUpdate(ctx, reinterpret_cast<unsigned char*>(cipher.data()), &n1, reinterpret_cast<const unsigned char*>(plain.data()), static_cast<int>(plain.size()));
+    EVP_EncryptFinal_ex(ctx, reinterpret_cast<unsigned char*>(cipher.data()) + n1, &n2);
+    EVP_CIPHER_CTX_free(ctx);
+    cipher.resize(static_cast<std::size_t>(n1 + n2));
+    const std::string blob = "v10" + cipher;
+    sqlite3_open((profile / "Default" / "Cookies").c_str(), &db);
+    sqlite3_exec(db, "CREATE TABLE meta(key TEXT, value TEXT); INSERT INTO meta VALUES('version','24');"
+                     "CREATE TABLE cookies(host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB);", nullptr, nullptr, nullptr);
+    sqlite3_stmt* stmt = nullptr;
+    sqlite3_prepare_v2(db, "INSERT INTO cookies VALUES('.youtube.com','SID','',?)", -1, &stmt, nullptr);
+    sqlite3_bind_blob(stmt, 1, blob.data(), static_cast<int>(blob.size()), SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    assert(readChromiumCookies(profile) == "SID=secret-sid");
+    fs::remove_all(profile);
+  }
+
   void testScan() {
     const fs::path root = fs::temp_directory_path() / ("okaru-music-test-" + std::to_string(::getpid()));
     fs::remove_all(root);
@@ -330,6 +424,7 @@ int main() {
   testRemote();
   testShuffle();
   testColors();
+  testYouTube();
   testScan();
   return 0;
 }

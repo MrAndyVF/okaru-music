@@ -100,6 +100,8 @@ namespace okaru::music {
     void setGapless(bool gapless);
     // 0 sin normalizar, 1 por pista, 2 por álbum (ReplayGain de las etiquetas).
     void setReplayGain(int mode);
+    // Archivo de cookies (formato Netscape) que yt-dlp usa con YouTube Music; vacío = sin sesión.
+    void setYtdlCookies(const std::string& file);
     // Ecualizador (vacío = apagado), también para la canción que se va en el fundido.
     void setEqualizer(const EqGains* gains);
 
@@ -128,6 +130,7 @@ namespace okaru::music {
     int m_crossfade = 0;
     std::string m_replayGain = "no";
     std::string m_filter; // "af" de mpv (ecualizador)
+    std::string m_ytdlRaw; // "ytdl-raw-options" (las cookies de YouTube Music)
     mpv_handle* m_tail = nullptr;
     Timer m_fadeTimer;
     std::chrono::steady_clock::time_point m_fadeStart;

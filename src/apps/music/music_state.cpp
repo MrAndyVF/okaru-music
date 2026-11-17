@@ -119,7 +119,8 @@ namespace okaru::music {
         }
         Server server;
         server.id = (*table)["id"].value_or("");
-        server.kind = (*table)["kind"].value_or(std::string()) == "subsonic" ? ServerKind::Subsonic : ServerKind::Jellyfin;
+        const std::string kind = (*table)["kind"].value_or(std::string());
+        server.kind = kind == "subsonic" ? ServerKind::Subsonic : kind == "youtube" ? ServerKind::YouTube : ServerKind::Jellyfin;
         server.name = (*table)["name"].value_or("");
         server.url = (*table)["url"].value_or("");
         server.user = (*table)["user"].value_or("");
@@ -130,6 +131,7 @@ namespace okaru::music {
       }
     }
     state.deviceId = root["device_id"].value_or("");
+    state.source = root["source"].value_or("");
     if (const auto* queue = root["queue"].as_array()) {
       for (const auto& node : *queue) {
         if (const auto item = node.value<std::string>()) {
@@ -157,7 +159,7 @@ namespace okaru::music {
     for (const Server& server : state.servers) {
       servers.push_back(toml::table{
           {"id", server.id},
-          {"kind", server.kind == ServerKind::Subsonic ? "subsonic" : "jellyfin"},
+          {"kind", server.kind == ServerKind::Subsonic ? "subsonic" : server.kind == ServerKind::YouTube ? "youtube" : "jellyfin"},
           {"name", server.name},
           {"url", server.url},
           {"user", server.user},
@@ -185,6 +187,7 @@ namespace okaru::music {
         {"reverse", std::move(reverse)},
         {"servers", std::move(servers)},
         {"device_id", state.deviceId},
+        {"source", state.source},
         {"settings",
          toml::table{
              {"crossfade", state.settings.crossfade},
