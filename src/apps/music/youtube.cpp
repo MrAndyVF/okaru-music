@@ -164,20 +164,29 @@ namespace okaru::music {
 
     std::string text(const json* node) { return node != nullptr && node->is_string() ? node->get<std::string>() : std::string(); }
 
-    // Todos los objetos bajo una clave, en orden de documento.
+    // Todos los objetos bajo una clave, en orden de documento. No entra en "counterpart": ahí YouTube pone la
+    // otra versión de cada canción de la radio (el video de la canción, o al revés), que saldría repetida.
     void collect(const json& node, std::string_view key, std::vector<const json*>& out) {
       if (node.is_object()) {
         for (auto it = node.begin(); it != node.end(); ++it) {
           if (it.key() == key) {
             out.push_back(&it.value());
           }
-          collect(it.value(), key, out);
+          if (it.key() != "counterpart") {
+            collect(it.value(), key, out);
+          }
         }
       } else if (node.is_array()) {
         for (const auto& child : node) {
           collect(child, key, out);
         }
       }
+    }
+
+    // Videoclip o video de usuario: el tipo que trae el enlace de reproducción (las canciones son "ATV").
+    bool isVideo(const json* watchEndpoint) {
+      const std::string type = text(path(*watchEndpoint, {"watchEndpointMusicSupportedConfigs", "watchEndpointMusicConfig", "musicVideoType"}));
+      return type == "MUSIC_VIDEO_TYPE_OMV" || type == "MUSIC_VIDEO_TYPE_UGC";
     }
 
     const json* first(const json& node, std::string_view key) {
@@ -353,6 +362,9 @@ namespace okaru::music {
         continue; // un artista, un álbum o una lista en los resultados, no una canción
       }
       track.title = text(path((*titleRuns)[0], {"text"}));
+      if (const json* watch = path((*titleRuns)[0], {"navigationEndpoint", "watchEndpoint"}); watch != nullptr) {
+        track.video = isVideo(watch);
+      }
       std::vector<std::string> artists;
       std::string plain; // primer texto suelto (artista sin enlace)
       for (std::size_t c = 1; c < columns->size(); ++c) {
@@ -465,6 +477,9 @@ namespace okaru::music {
         continue;
       }
       track.title = text(path((*title)[0], {"text"}));
+      if (const json* watch = path(*item, {"navigationEndpoint", "watchEndpoint"}); watch != nullptr && isVideo(watch)) {
+        continue; // solo canciones: los videos repiten las mismas con otra imagen
+      }
       std::vector<std::string> artists;
       if (const json* runs = path(*item, {"longBylineText", "runs"}); runs != nullptr && runs->is_array()) {
         for (const json& run : *runs) {
@@ -515,6 +530,9 @@ namespace okaru::music {
         if (entry.contains("musicResponsiveListItemRenderer")) {
           // Fila de canción («Mixes de canciones»): la misma forma que la búsqueda.
           for (const YtTrack& track : parseYtTracks(entry)) {
+            if (track.video) {
+              continue;
+            }
             shelf.cards.push_back({.kind = YtCard::Kind::Song, .title = track.title,
                                    .subtitle = track.album.empty() ? track.artist : track.artist + " • " + track.album,
                                    .artist = track.artist, .album = track.album, .thumbnail = track.thumbnail,
@@ -558,6 +576,9 @@ namespace okaru::music {
         const std::string browse = text(path(*nav, {"browseEndpoint", "browseId"}));
         const std::string type = text(path(*nav, {"browseEndpoint", "browseEndpointContextSupportedConfigs",
                                                    "browseEndpointContextMusicConfig", "pageType"}));
+        if (const json* watch = path(*nav, {"watchEndpoint"}); watch != nullptr && isVideo(watch)) {
+          continue; // videoclips: las recomendaciones son de canciones
+        }
         if (isVideoId(card.videoId)) {
           card.kind = YtCard::Kind::Song;
         } else if (type == "MUSIC_PAGE_TYPE_ALBUM" && !browse.empty()) {

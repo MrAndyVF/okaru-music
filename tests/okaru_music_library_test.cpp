@@ -370,6 +370,14 @@ namespace {
     assert(radio.size() == 1 && radio[0].title == "Crimen" && radio[0].artist == "Gustavo Cerati");
     assert(radio[0].album == "Ahí Vamos" && radio[0].duration == 233.0);
     assert(isVideoId("YVXNPPdh6wE") && !isVideoId("x; rm -rf /") && !isVideoId("short"));
+    // Con sesión, cada canción trae su «counterpart» (el video): no se repite. Y un videoclip suelto se salta.
+    nlohmann::json video = item;
+    video["playlistPanelVideoRenderer"]["videoId"] = "VIDEOxxxxx1";
+    video["playlistPanelVideoRenderer"]["navigationEndpoint"]["watchEndpoint"]["watchEndpointMusicSupportedConfigs"]
+         ["watchEndpointMusicConfig"]["musicVideoType"] = "MUSIC_VIDEO_TYPE_OMV";
+    const nlohmann::json wrapped{{"playlistPanelVideoWrapperRenderer", {{"primaryRenderer", item}, {"counterpart", {{{"counterpartRenderer", video}}}}}}};
+    const auto deduped = parseYtPanel(nlohmann::json{{"items", {wrapped, video}}});
+    assert(deduped.size() == 1 && deduped[0].videoId == "YVXNPPdh6wE");
 
     // Portada: canción, álbum y lista; los artistas (ni canción ni lista) se saltan.
     const auto two = [](const std::string& title, nlohmann::json nav) {
