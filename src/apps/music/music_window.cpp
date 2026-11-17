@@ -2105,6 +2105,21 @@ namespace okaru::music {
       return pixels;
     }
     constexpr int kLavaTexture = 128;
+
+    // Velo vertical: de transparente arriba a casi opaco abajo (premultiplicado), teñido con el color de fondo.
+    constexpr int kVeilTexture = 256;
+    const std::vector<std::uint8_t>& veilTexture() {
+      static std::vector<std::uint8_t> pixels;
+      if (pixels.empty()) {
+        pixels.resize(kVeilTexture * 4);
+        for (int y = 0; y < kVeilTexture; ++y) {
+          const float t = static_cast<float>(y) / static_cast<float>(kVeilTexture - 1);
+          const float alpha = 0.85F * t * t * (3.0F - 2.0F * t);
+          std::fill_n(pixels.begin() + y * 4, 4, static_cast<std::uint8_t>(std::lround(alpha * 255.0F)));
+        }
+      }
+      return pixels;
+    }
   } // namespace
 
   void MusicWindow::applyLavaColors(const std::string& cover) {
@@ -2175,6 +2190,18 @@ namespace okaru::music {
     const float controlsHeight = 120.0F * scale;
     const float side = std::clamp(std::min(width, height) * 0.30F, 120.0F * scale, 440.0F * scale);
     const float songTop = height - pad - controlsHeight - side - Style::spaceLg * scale;
+    // Velo en degradado desde la mitad de la carátula: el texto y los controles se leen sin un panel con borde.
+    if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
+      const auto& texture = veilTexture();
+      auto veil = std::make_unique<Image>();
+      veil->setSourceRaw(*renderer, texture.data(), texture.size(), 1, kVeilTexture, 4, PixmapFormat::RGBA);
+      veil->setFit(ImageFit::Stretch);
+      veil->setTint(resolveColorSpec(colorSpecFromRole(ColorRole::Surface)));
+      const float veilTop = songTop + side * 0.4F;
+      veil->setSize(width, height - veilTop);
+      veil->setPosition(0.0F, veilTop);
+      root->addChild(std::move(veil));
+    }
     auto cover = std::make_unique<CoverImage>();
     cover->setSize(side, side);
     cover->setPosition(pad, songTop);
@@ -2272,16 +2299,6 @@ namespace okaru::music {
       controls->layout(*renderer);
     }
     controls->setPosition(pad, height - pad - controls->height() + Style::spaceLg * scale);
-    // Panel translúcido detrás del tiempo y los controles: se leen sobre cualquier color del fondo.
-    const float inset = Style::spaceMd * scale;
-    auto panel = ui::box({
-        .fill = colorSpecFromRole(ColorRole::Surface, 0.8F),
-        .radius = Style::spaceLg * scale,
-        .width = controls->width() + inset * 2.0F,
-        .height = controls->height() + inset * 2.0F,
-    });
-    panel->setPosition(controls->x() - inset, controls->y() - inset);
-    root->addChild(std::move(panel));
     root->addChild(std::move(controls));
     return root;
   }
