@@ -139,6 +139,20 @@ namespace okaru::music {
         }
       }
     }
+    if (const auto* extras = root["extras"].as_array()) {
+      for (const auto& node : *extras) {
+        if (const auto* t = node.as_table(); t != nullptr && (*t)["path"].is_string()) {
+          state.extras.push_back({
+              .path = (*t)["path"].value_or(""),
+              .title = (*t)["title"].value_or(""),
+              .artist = (*t)["artist"].value_or(""),
+              .album = (*t)["album"].value_or(""),
+              .cover = (*t)["cover"].value_or(""),
+              .duration = (*t)["duration"].value_or(0.0),
+          });
+        }
+      }
+    }
     state.current = std::min<std::size_t>(
         static_cast<std::size_t>(std::max<std::int64_t>(0, root["current"].value_or<std::int64_t>(0))),
         state.queue.empty() ? 0 : state.queue.size() - 1
@@ -154,6 +168,13 @@ namespace okaru::music {
     toml::array queue;
     for (const auto& item : state.queue) {
       queue.push_back(item);
+    }
+    toml::array extras;
+    for (const ExtraTrack& t : state.extras) {
+      extras.push_back(toml::table{
+          {"path", t.path}, {"title", t.title}, {"artist", t.artist}, {"album", t.album}, {"cover", t.cover},
+          {"duration", t.duration},
+      });
     }
     toml::array servers;
     for (const Server& server : state.servers) {
@@ -183,6 +204,7 @@ namespace okaru::music {
         {"repeat", static_cast<std::int64_t>(state.repeat)},
         {"queue", std::move(queue)},
         {"current", static_cast<std::int64_t>(state.current)},
+        {"extras", std::move(extras)},
         {"sort", std::move(sort)},
         {"reverse", std::move(reverse)},
         {"servers", std::move(servers)},

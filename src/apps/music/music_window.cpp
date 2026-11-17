@@ -158,6 +158,7 @@ namespace okaru::music {
       const Track* track = nullptr; // nullptr: algo de la cola que no está en la biblioteca
       std::string item;             // ruta o URL
       int number = 0;               // número a mostrar (0 = sin número)
+      std::string origin;           // insignia de origen (listas en «Todos»), vacía si no va
     };
 
     class TrackRow final : public Node {
@@ -287,7 +288,7 @@ namespace okaru::music {
       row.m_title->setMaxWidth(textWidth);
       row.m_title->setMaxLines(1);
       row.m_title->layout(renderer);
-      row.m_subtitle->setText(track != nullptr ? joinDot({track->artist, track->album}) : data.item);
+      row.m_subtitle->setText(track != nullptr ? joinDot({data.origin, track->artist, track->album}) : data.item);
       row.m_subtitle->setFontSize(Style::fontSizeCaption * s);
       row.m_subtitle->setColor(muted);
       row.m_subtitle->setMaxWidth(textWidth);
@@ -850,6 +851,35 @@ namespace okaru::music {
     m_player.setRepeat(m_state.repeat);
     applySettings();
     setModel(m_library.load());
+    // Las carátulas de «Para ti» cambian cada día: las que no se usan hace un mes se borran (se usan = se tocan).
+    {
+      std::error_code ec;
+      const auto old = fs::file_time_type::clock::now() - std::chrono::days(30);
+      for (const auto& entry : fs::directory_iterator(m_library.coversDir(), ec)) {
+        if (entry.path().filename().string().starts_with("card-") && entry.last_write_time(ec) < old) {
+          fs::remove(entry.path(), ec);
+        }
+      }
+    }
+    // La «Favoritas» única de la 1.0.0 (sin origen) se reparte en la de cada origen, en el mismo orden.
+    if (const auto it = std::ranges::find_if(m_playlists.all(), [](const Playlist& p) { return p.favorites && p.origin.empty(); });
+        it != m_playlists.all().end()) {
+      const std::vector<std::string> items = it->items;
+      m_playlists.remove(it->id);
+      for (const auto& item : std::views::reverse(items)) {
+        m_playlists.toggleLike(item, originOf(item));
+      }
+    }
+    for (ExtraTrack& extra : m_state.extras) {
+      std::error_code ec;
+      if (!extra.cover.empty() && !fs::exists(extra.cover, ec)) {
+        extra.cover.clear(); // la limpió la caché: se vuelve a pedir
+      }
+      m_extraTracks.insert_or_assign(extra.path, Track{.path = extra.path, .title = std::move(extra.title),
+                                                       .artist = std::move(extra.artist), .album = std::move(extra.album),
+                                                       .cover = std::move(extra.cover), .duration = extra.duration});
+    }
+    m_state.extras.clear();
     if (!m_state.queue.empty() && m_state.settings.resume) {
       m_player.playQueue(m_state.queue, m_state.current, true); // queda en pausa donde estaba
     }
@@ -925,12 +955,40 @@ namespace okaru::music {
     return server != nullptr && path.starts_with(remotePrefix(*server));
   }
 
+  std::string MusicWindow::originOf(const std::string& path) const {
+    if (path.starts_with('/')) {
+      return "local";
+    }
+    const auto it = std::ranges::find_if(m_state.servers, [&](const Server& s) { return path.starts_with(remotePrefix(s)); });
+    return it != m_state.servers.end() ? it->id : std::string();
+  }
+
+  std::string MusicWindow::originName(const std::string& origin) const {
+    if (origin == "local") {
+      return tr("apps.music.source.local");
+    }
+    const auto it = std::ranges::find(m_state.servers, origin, &Server::id);
+    return it != m_state.servers.end() ? it->name : std::string();
+  }
+
+  bool MusicWindow::showsPlaylist(const Playlist& list) const {
+    return m_state.source.empty() || list.origin == m_state.source;
+  }
+
+  bool MusicWindow::acceptsSongs(const Playlist& list, const std::vector<std::string>& paths) const {
+    return !list.favorites && showsPlaylist(list)
+        && (list.origin.empty() || std::ranges::all_of(paths, [&](const std::string& p) { return originOf(p) == list.origin; }));
+  }
+
   void MusicWindow::setSource(std::string source) {
     if (source == m_state.source) {
       return;
     }
     m_state.source = std::move(source);
     saveState();
+    if (const Playlist* list = m_playlists.find(m_playlistId); m_view == View::Playlist && (list == nullptr || !showsPlaylist(*list))) {
+      m_view = View::Albums; // la lista abierta es de otro origen
+    }
     m_ytResults.clear();
     m_ytQuery.clear();
     setModel(organize(m_all));
@@ -1049,6 +1107,13 @@ namespace okaru::music {
     m_state.repeat = m_player.repeat();
     m_state.queue = state.queue;
     m_state.current = state.current > 0 ? static_cast<std::size_t>(state.current) : 0;
+    m_state.extras.clear();
+    for (const auto& item : state.queue) {
+      if (const auto it = m_extraTracks.find(item); it != m_extraTracks.end() && !m_allByPath.contains(item)) {
+        const Track& t = it->second;
+        m_state.extras.push_back({t.path, t.title, t.artist, t.album, t.cover, t.duration});
+      }
+    }
     if (!music::saveState(m_state, statePath())) {
       kLog.warn("cannot save {}", statePath().string());
     }
@@ -1629,6 +1694,9 @@ namespace okaru::music {
     auto lists = ui::scrollView({.contentScale = scale, .flexGrow = 1.0F});
     auto column = ui::column({.align = FlexAlign::Stretch, .gap = 2.0F * scale, .width = (m_rail ? kRailWidth : kSidebarWidth) * scale - Style::spaceSm * 2.0F * scale});
     for (const Playlist& list : m_playlists.all()) {
+      if (!showsPlaylist(list)) {
+        continue;
+      }
       const bool active = m_view == View::Playlist && m_playlistId == list.id && m_query.empty();
       const std::string name = playlistName(list);
       column->addChild(ui::button({
@@ -1715,9 +1783,16 @@ namespace okaru::music {
   std::unique_ptr<Node> MusicWindow::buildTracks(std::vector<std::size_t> tracks, bool numbers, float scale) {
     std::vector<TrackRowData> rows;
     rows.reserve(tracks.size());
+    // En una lista con «Todos», cada canción dice de qué origen es.
+    const bool badges = m_view == View::Playlist && m_query.empty() && m_state.source.empty() && !m_state.servers.empty();
     for (std::size_t i = 0; i < tracks.size(); ++i) {
       const Track& track = m_model.tracks[tracks[i]];
-      rows.push_back({.track = &track, .item = track.path, .number = numbers ? track.number : static_cast<int>(i + 1)});
+      rows.push_back({
+          .track = &track,
+          .item = track.path,
+          .number = numbers ? track.number : static_cast<int>(i + 1),
+          .origin = badges ? originName(originOf(track.path)) : std::string(),
+      });
     }
     auto items = std::make_shared<std::vector<std::size_t>>(std::move(tracks));
     const std::int64_t playlist = m_view == View::Playlist && m_query.empty() ? m_playlistId : 0;
@@ -3337,12 +3412,13 @@ namespace okaru::music {
     if (const auto it = m_cardCovers.find(url); it != m_cardCovers.end()) {
       return it->second;
     }
-    const std::string big = ytCoverSize(url, 320);
+    const std::string big = ytCoverSize(url, 544); // el tamaño de las de la biblioteca: nítida en el reproductor grande
     gchar* sum = g_compute_checksum_for_string(G_CHECKSUM_MD5, big.c_str(), static_cast<gssize>(big.size()));
     const fs::path target = m_library.coversDir() / (std::string("card-") + sum + ".jpg");
     g_free(sum);
     std::error_code ec;
     if (fs::exists(target, ec)) {
+      fs::last_write_time(target, fs::file_time_type::clock::now(), ec); // en uso: no la borra la limpieza
       return m_cardCovers[url] = target.string();
     }
     if (m_cardCoversPending.insert(url).second) {
@@ -4039,7 +4115,12 @@ namespace okaru::music {
   // ── Listas, «me gusta» y menú ─────────────────────────────────────────────────────────────────────
 
   std::string MusicWindow::playlistName(const Playlist& list) const {
-    return list.favorites ? tr("apps.music.favorites") : list.name;
+    std::string name = list.favorites ? tr("apps.music.favorites") : list.name;
+    // En «Todos» se ven las de cada origen: el nombre lleva el suyo (las mixtas, ninguno).
+    if (m_state.source.empty() && !m_state.servers.empty() && !list.origin.empty()) {
+      name += " · " + originName(list.origin);
+    }
+    return name;
   }
 
   void MusicWindow::openPlaylist(std::int64_t id) {
@@ -4055,8 +4136,9 @@ namespace okaru::music {
   }
 
   void MusicWindow::toggleLike(const std::string& path) {
-    const bool first = std::ranges::none_of(m_playlists.all(), &Playlist::favorites);
-    m_playlists.toggleLike(path);
+    const std::string origin = originOf(path);
+    const bool first = std::ranges::none_of(m_playlists.all(), [&](const Playlist& p) { return p.favorites && p.origin == origin; });
+    m_playlists.toggleLike(path, origin);
     if (m_likeButton != nullptr && path == m_player.currentItem()) {
       m_likeButton->setGlyph(m_playlists.liked(path) ? "heart-filled" : "heart");
     }
@@ -4101,8 +4183,8 @@ namespace okaru::music {
     }
     menu.push_back({.separator = true});
     for (const Playlist& list : m_playlists.all()) {
-      if (!list.favorites && list.id != playlist) {
-        menu.push_back({tr("apps.music.menu.add-to", "name", list.name), [this, id = list.id, paths] { m_playlists.add(id, paths); }});
+      if (list.id != playlist && acceptsSongs(list, paths)) {
+        menu.push_back({tr("apps.music.menu.add-to", "name", playlistName(list)), [this, id = list.id, paths] { m_playlists.add(id, paths); }});
       }
     }
     menu.push_back({tr("apps.music.menu.new-playlist"), [this, paths] { openDialog(Dialog::NewPlaylist, paths); }});
@@ -4133,8 +4215,8 @@ namespace okaru::music {
     }
     std::vector<MenuEntry> menu;
     for (const Playlist& list : m_playlists.all()) {
-      if (!list.favorites) {
-        menu.push_back({tr("apps.music.menu.add-to", "name", list.name), [this, id = list.id, item] { m_playlists.add(id, {item}); }});
+      if (acceptsSongs(list, {item})) {
+        menu.push_back({tr("apps.music.menu.add-to", "name", playlistName(list)), [this, id = list.id, item] { m_playlists.add(id, {item}); }});
       }
     }
     menu.push_back({tr("apps.music.menu.new-playlist"), [this, item] { openDialog(Dialog::NewPlaylist, {item}); }});
@@ -4230,7 +4312,7 @@ namespace okaru::music {
       return;
     }
     if (m_dialog == Dialog::NewPlaylist) {
-      const std::int64_t id = m_playlists.create(name);
+      const std::int64_t id = m_playlists.create(name, m_state.source);
       if (!m_dialogPaths.empty()) {
         m_playlists.add(id, m_dialogPaths);
       }

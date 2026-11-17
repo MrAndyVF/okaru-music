@@ -43,6 +43,16 @@ namespace okaru::music {
     SourceOrder covers;
   };
 
+  // Canción de la cola fuera de la biblioteca (resultado de YouTube): lo que hace falta para mostrarla al volver.
+  struct ExtraTrack {
+    std::string path;
+    std::string title;
+    std::string artist;
+    std::string album;
+    std::string cover;
+    double duration = 0.0;
+  };
+
   struct MusicState {
     std::vector<std::filesystem::path> folders;
     double volume = 100.0;
@@ -50,6 +60,7 @@ namespace okaru::music {
     Repeat repeat = Repeat::Off;
     std::vector<std::string> queue;
     std::size_t current = 0;
+    std::vector<ExtraTrack> extras;
     // Orden de Álbumes, Artistas, Canciones y Géneros (índice = View), y si va invertido.
     std::array<std::uint8_t, 4> sort{};
     std::array<bool, 4> reverse{};

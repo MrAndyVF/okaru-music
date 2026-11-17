@@ -110,6 +110,13 @@ namespace okaru::music {
     // Origen que se explora (ver MusicState::source).
     void setSource(std::string source);
     [[nodiscard]] bool inSource(const std::string& path) const;
+    // Origen de una canción ("local" o id del servidor; vacío si su servidor ya no está) y su nombre visible.
+    [[nodiscard]] std::string originOf(const std::string& path) const;
+    [[nodiscard]] std::string originName(const std::string& origin) const;
+    // Con un origen elegido solo se ven sus listas; con «Todos», todas.
+    [[nodiscard]] bool showsPlaylist(const Playlist& list) const;
+    // Lista a la que se pueden agregar estas canciones desde el menú.
+    [[nodiscard]] bool acceptsSongs(const Playlist& list, const std::vector<std::string>& paths) const;
     [[nodiscard]] const Server* sourceServer() const;
     // Búsqueda en el catálogo de YouTube Music (con el origen en YouTube Music).
     void searchYouTube();
