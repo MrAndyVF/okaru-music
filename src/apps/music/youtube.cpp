@@ -517,7 +517,8 @@ namespace okaru::music {
           for (const YtTrack& track : parseYtTracks(entry)) {
             shelf.cards.push_back({.kind = YtCard::Kind::Song, .title = track.title,
                                    .subtitle = track.album.empty() ? track.artist : track.artist + " • " + track.album,
-                                   .thumbnail = track.thumbnail, .videoId = track.videoId});
+                                   .artist = track.artist, .album = track.album, .thumbnail = track.thumbnail,
+                                   .videoId = track.videoId});
           }
           continue;
         }
@@ -531,7 +532,19 @@ namespace okaru::music {
         }
         if (const json* runs = path(*item, {"subtitle", "runs"}); runs != nullptr && runs->is_array()) {
           for (const json& run : *runs) {
-            card.subtitle += text(path(run, {"text"}));
+            const std::string value = text(path(run, {"text"}));
+            card.subtitle += value;
+            const std::string type = pageType(run);
+            if (type == "MUSIC_PAGE_TYPE_ARTIST" || type == "MUSIC_PAGE_TYPE_USER_CHANNEL") {
+              card.artist += (card.artist.empty() ? "" : ", ") + value;
+            } else if (type == "MUSIC_PAGE_TYPE_ALBUM") {
+              card.album = value;
+            }
+          }
+          // Sin artista enlazado: lo último del subtítulo («Canción • Artista»).
+          if (card.artist.empty()) {
+            const auto dot = card.subtitle.rfind(" • ");
+            card.artist = dot == std::string::npos ? card.subtitle : card.subtitle.substr(dot + 5);
           }
         }
         if (const json* thumb = path(*item, {"thumbnailRenderer"}); thumb != nullptr) {

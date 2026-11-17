@@ -91,6 +91,8 @@ namespace okaru::music {
     void youTubeTracks(const Server& server, const std::string& browseId, SearchFn done);
     // Radio de una canción: ella primero y luego las que YouTube Music le pone después.
     void youTubeRadio(const Server& server, const std::string& videoId, SearchFn done);
+    // Una canción de YouTube Music como pista de Valandy (recuerda su carátula para coverUrl).
+    [[nodiscard]] Track ytTrack(const Server& server, const struct YtTrack& yt);
     // Archivo de cookies para yt-dlp (en XDG_RUNTIME_DIR, solo del usuario); vacío sin sesión.
     [[nodiscard]] const std::string& ytdlCookies() const noexcept { return m_ytdlCookies; }
 
@@ -113,7 +115,6 @@ namespace okaru::music {
     void ytPages(const Server& server, std::string browseId, std::string token, bool inBody, int page,
                  std::shared_ptr<std::vector<Track>> out, struct YtHeader header, SearchFn done);
     void ytBrowse(std::shared_ptr<YtSync> sync, std::string browseId, std::string token, bool tokenInBody, int page);
-    [[nodiscard]] Track ytTrack(const Server& server, const struct YtTrack& yt);
     void writeYtdlCookies();
     void syncSubsonicAlbum(
         const Server& server, std::shared_ptr<std::vector<Track>> out, std::shared_ptr<std::vector<std::string>> albums,

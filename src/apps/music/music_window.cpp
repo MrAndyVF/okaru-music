@@ -3240,8 +3240,26 @@ namespace okaru::music {
     }
     const Server server = *found;
     RemoteRef ref;
+    // La canción misma primero (con sus datos y carátula de la biblioteca) y luego la radio, sin la versión con
+    // la que YouTube la empieza.
+    const auto follow = [this, path](std::vector<Track> tracks) {
+      if (!tracks.empty()) {
+        tracks.erase(tracks.begin());
+      }
+      std::vector<std::string> paths{path};
+      for (Track& t : tracks) {
+        if (t.path == path) {
+          continue;
+        }
+        paths.push_back(t.path);
+        if (!m_allByPath.contains(t.path)) {
+          m_extraTracks.insert_or_assign(t.path, std::move(t));
+        }
+      }
+      m_player.playQueue(paths, 0);
+    };
     if (path.starts_with("yt://") && parseRemote(path, ref)) {
-      m_remote->youTubeRadio(server, ref.item, [this](std::vector<Track> tracks) { playExtra(std::move(tracks), 0); });
+      m_remote->youTubeRadio(server, ref.item, follow);
       return;
     }
     // Una canción propia: se busca en YouTube Music y la radio sigue después de ella (que suena desde aquí).
@@ -3249,24 +3267,12 @@ namespace okaru::music {
     if (track == nullptr) {
       return;
     }
-    m_remote->searchYouTube(server, track->title + " " + track->artist, [this, server, path](std::vector<Track> results) {
+    m_remote->searchYouTube(server, track->title + " " + track->artist, [this, server, follow](std::vector<Track> results) {
       RemoteRef first;
       if (results.empty() || !parseRemote(results.front().path, first)) {
         return;
       }
-      m_remote->youTubeRadio(server, first.item, [this, path](std::vector<Track> tracks) {
-        if (!tracks.empty()) {
-          tracks.erase(tracks.begin()); // la versión de YouTube de la misma canción
-        }
-        std::vector<std::string> paths{path};
-        for (Track& t : tracks) {
-          paths.push_back(t.path);
-          if (!m_allByPath.contains(t.path)) {
-            m_extraTracks.insert_or_assign(t.path, std::move(t));
-          }
-        }
-        m_player.playQueue(paths, 0);
-      });
+      m_remote->youTubeRadio(server, first.item, follow);
     });
   }
 
@@ -3303,7 +3309,21 @@ namespace okaru::music {
     };
     // Una canción empieza su radio, como en YouTube Music; un álbum o una lista, sus canciones.
     if (card.kind == YtCard::Kind::Song) {
-      m_remote->youTubeRadio(*server, card.videoId, std::move(done));
+      // Primero la canción de la tarjeta tal cual (su título y la misma carátula, ya descargada): la radio de
+      // YouTube empieza por «su» video, que a veces es otra versión (el videoclip) con otra imagen.
+      Track own = m_remote->ytTrack(*server, {.videoId = card.videoId, .title = card.title, .artist = card.artist,
+                                               .artistLinked = true, .album = card.album, .thumbnail = card.thumbnail});
+      own.cover = cardCover(card.thumbnail);
+      m_remote->youTubeRadio(*server, card.videoId, [this, own = std::move(own)](std::vector<Track> tracks) mutable {
+        if (!tracks.empty()) {
+          tracks.erase(tracks.begin());
+        }
+        std::erase_if(tracks, [&](const Track& t) { return t.path.ends_with("/" + own.path.substr(own.path.rfind('/') + 1)); });
+        tracks.insert(tracks.begin(), std::move(own));
+        m_cardLoading.clear();
+        playExtra(std::move(tracks), 0);
+        m_app.requestRebuild();
+      });
     } else {
       m_remote->youTubeTracks(*server, card.browseId, std::move(done));
     }

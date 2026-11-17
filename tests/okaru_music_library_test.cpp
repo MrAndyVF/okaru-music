@@ -390,6 +390,7 @@ namespace {
     assert(shelves.size() == 1 && shelves[0].title == "Vuelve a escucharlo" && shelves[0].cards.size() == 3);
     assert(shelves[0].cards[0].kind == YtCard::Kind::Song && shelves[0].cards[0].videoId == "217Bw85-5cw");
     assert(shelves[0].cards[0].subtitle == "Canción • Artista");
+    assert(shelves[0].cards[0].artist == "Artista"); // sin enlace: lo último del subtítulo
     assert(shelves[0].cards[1].kind == YtCard::Kind::Album && shelves[0].cards[2].kind == YtCard::Kind::Playlist);
 
     // Biblioteca: recientes por fecha del archivo (los de servidores no cuentan); redescubre estable por día.

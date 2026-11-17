@@ -89,6 +89,8 @@ namespace okaru::music {
     Kind kind = Kind::Song;
     std::string title;
     std::string subtitle;
+    std::string artist; // de la canción (para reproducirla con sus datos)
+    std::string album;
     std::string thumbnail;
     std::string videoId;  // canción
     std::string browseId; // álbum ("MPREb_…") o lista ("VL…")
