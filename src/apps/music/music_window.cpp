@@ -3319,7 +3319,7 @@ namespace okaru::music {
   std::unique_ptr<Node> MusicWindow::buildSettings(float width, float height, float scale) {
     auto& settings = m_state.settings;
     const float pad = Style::spaceLg * scale;
-    const float inner = std::min(760.0F * scale, std::max(0.0F, width - pad * 2.0F - 16.0F * scale));
+    float inner = std::min(760.0F * scale, std::max(0.0F, width - pad * 2.0F - 16.0F * scale));
     auto page = ui::column({.align = FlexAlign::Stretch, .gap = Style::spaceMd * scale, .padding = pad, .width = inner + pad * 2.0F});
 
     const auto section = [&](const char* glyph, const char* key) {
@@ -3360,9 +3360,27 @@ namespace okaru::music {
     };
 
     page->addChild(ui::label({.text = tr("apps.music.settings.title"), .fontSize = Style::fontSizeHeader * scale, .fontWeight = FontWeight::SemiBold}));
+    // Cada sección en su tarjeta; las filas usan el ancho de adentro.
+    const float cardPad = Style::spaceMd * scale;
+    const float cardWidth = inner;
+    inner -= cardPad * 2.0F;
+    Flex* box = nullptr;
+    const auto card = [&](std::unique_ptr<Node> heading) {
+      auto column = ui::column({
+          .align = FlexAlign::Stretch,
+          .gap = Style::spaceMd * scale,
+          .padding = cardPad,
+          .fill = colorSpecFromRole(ColorRole::SurfaceContainerLow),
+          .radius = Style::spaceMd * scale,
+          .border = colorSpecFromRole(ColorRole::OutlineVariant, 0.6F),
+          .width = cardWidth,
+      });
+      column->addChild(std::move(heading));
+      box = static_cast<Flex*>(page->addChild(std::move(column)));
+    };
 
     // Biblioteca.
-    page->addChild(section("folder", "apps.music.settings.section.library"));
+    card(section("folder", "apps.music.settings.section.library"));
     for (std::size_t i = 0; i < m_state.folders.size(); ++i) {
       const fs::path& folder = m_state.folders[i];
       auto row = ui::row({
@@ -3381,7 +3399,7 @@ namespace okaru::music {
           .tooltip = tr("apps.music.remove-folder", "folder", folder.string()),
           .onClick = [this, i] { removeFolder(i); },
       }));
-      page->addChild(std::move(row));
+      box->addChild(std::move(row));
     }
     auto folderButtons = ui::row({.align = FlexAlign::Center, .gap = Style::spaceSm * scale});
     folderButtons->addChild(ui::button({.text = tr("apps.music.add-folder"), .glyph = "folder-plus", .variant = ButtonVariant::Outline, .onClick = [this] { addFolder(); }}));
@@ -3392,9 +3410,9 @@ namespace okaru::music {
         .variant = ButtonVariant::Ghost,
         .onClick = [this] { rescan(); },
     }));
-    page->addChild(std::move(folderButtons));
-    page->addChild(setting("apps.music.settings.scan-on-start", toggle(settings.scanOnStart)));
-    page->addChild(setting(
+    box->addChild(std::move(folderButtons));
+    box->addChild(setting("apps.music.settings.scan-on-start", toggle(settings.scanOnStart)));
+    box->addChild(setting(
         "apps.music.settings.rebuild",
         ui::button({
             .text = tr("apps.music.settings.rebuild.action"),
@@ -3411,8 +3429,8 @@ namespace okaru::music {
     ));
 
     // Servidores.
-    page->addChild(section("server", "apps.music.servers.title"));
-    page->addChild(ui::label({
+    card(section("server", "apps.music.servers.title"));
+    box->addChild(ui::label({
         .text = tr("apps.music.servers.hint"),
         .fontSize = Style::fontSizeCaption * scale,
         .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
@@ -3475,10 +3493,10 @@ namespace okaru::music {
           .tooltip = tr("apps.music.servers.remove"),
           .onClick = [this, id = server.id] { removeServer(id); },
       }));
-      page->addChild(std::move(row));
+      box->addChild(std::move(row));
     }
     const bool hasYouTube = std::ranges::contains(m_state.servers, ServerKind::YouTube, &Server::kind);
-    page->addChild(ui::row(
+    box->addChild(ui::row(
         {.align = FlexAlign::Center, .gap = Style::spaceSm * scale},
         ui::button({
             .text = tr("apps.music.servers.add"),
@@ -3504,7 +3522,7 @@ namespace okaru::music {
     ));
 
     // Reproducción.
-    page->addChild(section("player-play", "apps.music.settings.section.playback"));
+    card(section("player-play", "apps.music.settings.section.playback"));
     auto fade = ui::row({.align = FlexAlign::Center, .gap = Style::spaceSm * scale});
     fade->addChild(ui::slider({
         .minValue = 0.0,
@@ -3532,10 +3550,11 @@ namespace okaru::music {
                                         : tr("apps.music.settings.crossfade.seconds", "seconds", settings.crossfade),
         .fontSize = Style::fontSizeCaption * scale,
         .minWidth = 80.0F * scale,
+        .textAlign = TextAlign::End,
     }));
-    page->addChild(setting("apps.music.settings.crossfade", std::move(fade)));
-    page->addChild(setting("apps.music.settings.gapless", toggle(settings.gapless, [this] { applySettings(); })));
-    page->addChild(setting(
+    box->addChild(setting("apps.music.settings.crossfade", std::move(fade)));
+    box->addChild(setting("apps.music.settings.gapless", toggle(settings.gapless, [this] { applySettings(); })));
+    box->addChild(setting(
         "apps.music.settings.replaygain",
         ui::select({
             .options = std::vector<std::string>{tr("apps.music.settings.replaygain.off"), tr("apps.music.settings.replaygain.track"),
@@ -3550,11 +3569,11 @@ namespace okaru::music {
                 },
         })
     ));
-    page->addChild(setting("apps.music.settings.resume", toggle(settings.resume)));
+    box->addChild(setting("apps.music.settings.resume", toggle(settings.resume)));
 
     // Ecualizador.
-    page->addChild(section("adjustments-horizontal", "apps.music.settings.section.equalizer"));
-    page->addChild(setting("apps.music.settings.equalizer", toggle(settings.equalizer, [this] { applySettings(); })));
+    card(section("adjustments-horizontal", "apps.music.settings.section.equalizer"));
+    box->addChild(setting("apps.music.settings.equalizer", toggle(settings.equalizer, [this] { applySettings(); })));
     {
       std::vector<std::string> presets;
       std::size_t selected = kEqPresets.size(); // «personalizado»
@@ -3565,7 +3584,7 @@ namespace okaru::music {
         }
       }
       presets.push_back(tr("apps.music.eq.custom"));
-      page->addChild(setting(
+      box->addChild(setting(
           "apps.music.settings.eq-preset",
           ui::select({
               .options = std::move(presets),
@@ -3619,35 +3638,35 @@ namespace okaru::music {
             .fontSize = Style::fontSizeCaption * scale,
             .minWidth = 56.0F * scale,
         }));
-        page->addChild(std::move(row));
+        box->addChild(std::move(row));
       }
     }
 
     // Letras.
-    page->addChild(section("microphone-2", "apps.music.settings.section.lyrics"));
-    page->addChild(ui::label({
+    card(section("microphone-2", "apps.music.settings.section.lyrics"));
+    box->addChild(ui::label({
         .text = tr("apps.music.settings.lyrics.hint"),
         .fontSize = Style::fontSizeCaption * scale,
         .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
         .maxWidth = inner,
     }));
-    page->addChild(buildSourceList(settings.lyrics, true, inner, scale));
-    page->addChild(setting("apps.music.settings.prefer-synced", toggle(settings.preferSynced, [this] { m_lyricsItem.clear(); })));
+    box->addChild(buildSourceList(settings.lyrics, true, inner, scale));
+    box->addChild(setting("apps.music.settings.prefer-synced", toggle(settings.preferSynced, [this] { m_lyricsItem.clear(); })));
 
     // Carátulas.
-    page->addChild(section("photo", "apps.music.settings.section.covers"));
-    page->addChild(ui::label({
+    card(section("photo", "apps.music.settings.section.covers"));
+    box->addChild(ui::label({
         .text = tr("apps.music.settings.covers.hint"),
         .fontSize = Style::fontSizeCaption * scale,
         .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
         .maxWidth = inner,
     }));
-    page->addChild(buildSourceList(settings.covers, false, inner, scale));
-    page->addChild(setting(
+    box->addChild(buildSourceList(settings.covers, false, inner, scale));
+    box->addChild(setting(
         "apps.music.settings.covers.download",
         toggle(settings.covers.enabled[static_cast<std::size_t>(Source::Online)], [this] { fetchMissingCovers(); })
     ));
-    page->addChild(ui::label({
+    box->addChild(ui::label({
         .text = tr("apps.music.settings.privacy"),
         .fontSize = Style::fontSizeCaption * scale,
         .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
@@ -3660,7 +3679,10 @@ namespace okaru::music {
         .width = width,
         .height = height,
     });
-    scroll->content()->addChild(std::move(page));
+    // Centrada en el espacio libre (con ventanas anchas no queda pegada a la barra lateral).
+    auto centered = ui::row({.justify = FlexJustify::Center, .width = std::max(0.0F, width - 16.0F * scale)});
+    centered->addChild(std::move(page));
+    scroll->content()->addChild(std::move(centered));
     return scroll;
   }
 
