@@ -4,6 +4,8 @@
 #include "apps/common/portal_file_chooser.h"
 #include "render/core/image_file_loader.h"
 #include "render/core/texture_manager.h"
+#include "render/scene/input_area.h"
+#include "render/scene/rect_node.h"
 #include "ui/controls/image.h"
 #include "core/deferred_call.h"
 #include "core/files/resource_paths.h"
@@ -23,6 +25,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <numbers>
 #include <glib.h>
 #include <linux/input-event-codes.h>
 
@@ -481,6 +484,148 @@ namespace okaru::music {
   // otra. Las animaciones solo mueven, escalan y funden con medidas ya tomadas (place(), sin maquetar ni redibujar
   // texto) y piden un cuadro nuevo en cada paso: así el movimiento es continuo. Como en Kopuz, las líneas se
   // atenúan con la distancia a la que suena, y ese foco también se desplaza de forma continua.
+  // ── Barra de tiempo ondulada (Material 3 Expressive) ──────────────────────────────────────────────
+  // Lo reproducido es una onda que avanza mientras suena (una textura desplazada dentro de un recorte del ancho
+  // reproducido) y se aplana al pausar; luego un hueco, el indicador en píldora, otro hueco y la pista restante.
+  // Se mueve en cada cuadro con la posición estimada: avanza continuo, sin esperar los avisos de mpv.
+  class WaveSeekBar final : public Node {
+  public:
+    using SeekFn = std::function<void(double fraction)>;
+
+    WaveSeekBar(Renderer& renderer, float width, float scale, float bufferScale, SeekFn seek)
+        : m_scale(scale), m_seek(std::move(seek)) {
+      const float s = scale;
+      m_wavelength = 40.0F * s;
+      const float thickness = 4.0F * s;
+      const float amplitude = 3.5F * s;
+      setSize(width, kHeight * s);
+      const float cy = height() * 0.5F;
+      const Color primary = colorForRole(ColorRole::Primary);
+      const auto style = [&](const Color& color, float radius) {
+        return RoundedRectStyle{.fill = color, .border = color, .radius = radius};
+      };
+
+      m_track = static_cast<RectNode*>(addChild(std::make_unique<RectNode>()));
+      m_track->setStyle(style(colorForRole(ColorRole::Primary, 0.4F), thickness * 0.5F)); // pista inactiva: el color principal, tenue
+      m_track->setSize(0.0F, thickness);
+      m_track->setPosition(0.0F, cy - thickness * 0.5F);
+
+      m_clip = addChild(std::make_unique<Node>());
+      m_clip->setClipChildren(true);
+      m_clip->setSize(0.0F, height());
+      m_flat = static_cast<RectNode*>(m_clip->addChild(std::make_unique<RectNode>()));
+      m_flat->setStyle(style(primary, thickness * 0.5F));
+      m_flat->setSize(width, thickness);
+      m_flat->setPosition(0.0F, cy - thickness * 0.5F);
+
+      // La onda, pintada a la escala real de la pantalla: un periodo de más para desplazarla sin cortes.
+      const float waveW = width + m_wavelength;
+      const float waveH = amplitude * 2.0F + thickness + 2.0F * s;
+      const int tw = std::max(1, static_cast<int>(std::ceil(waveW * bufferScale)));
+      const int th = std::max(1, static_cast<int>(std::ceil(waveH * bufferScale)));
+      std::vector<std::uint8_t> pixels(static_cast<std::size_t>(tw) * th * 4);
+      const float k = 2.0F * std::numbers::pi_v<float> / (m_wavelength * bufferScale);
+      const float amp = amplitude * bufferScale;
+      const float half = thickness * bufferScale * 0.5F;
+      const float mid = static_cast<float>(th) * 0.5F;
+      for (int x = 0; x < tw; ++x) {
+        const float px = static_cast<float>(x) + 0.5F;
+        const float curve = mid + amp * std::sin(k * px);
+        const float slope = amp * k * std::cos(k * px);
+        const float norm = 1.0F / std::sqrt(1.0F + slope * slope); // distancia vertical → perpendicular
+        for (int y = 0; y < th; ++y) {
+          const float d = std::abs(static_cast<float>(y) + 0.5F - curve) * norm;
+          const float a = std::clamp(half - d + 0.5F, 0.0F, 1.0F);
+          std::fill_n(pixels.begin() + (static_cast<std::size_t>(y) * tw + x) * 4, 4, static_cast<std::uint8_t>(std::lround(a * 255.0F)));
+        }
+      }
+      m_wave = static_cast<Image*>(m_clip->addChild(std::make_unique<Image>()));
+      m_wave->setSourceRaw(renderer, pixels.data(), pixels.size(), tw, th, tw * 4, PixmapFormat::RGBA);
+      m_wave->setFit(ImageFit::Stretch);
+      m_wave->setTint(primary);
+      m_wave->setSize(waveW, waveH);
+      m_wave->setPosition(0.0F, cy - waveH * 0.5F);
+
+      m_thumb = static_cast<RectNode*>(addChild(std::make_unique<RectNode>()));
+      m_thumb->setStyle(style(primary, 2.0F * s));
+      m_thumb->setSize(4.0F * s, 22.0F * s);
+      m_thumb->setPosition(0.0F, cy - 11.0F * s);
+
+      m_area = static_cast<InputArea*>(addChild(std::make_unique<InputArea>()));
+      m_area->setSize(width, height());
+      m_area->setOnPress([this](const InputArea::PointerData& pointer) {
+        if (pointer.pressed) {
+          m_dragging = true;
+          m_dragFraction = fractionAt(pointer.localX);
+        } else if (m_dragging) {
+          m_dragging = false;
+          m_shown = m_dragFraction;
+          if (m_seek) {
+            m_seek(m_dragFraction);
+          }
+        }
+      });
+      m_area->setOnMotion([this](const InputArea::PointerData& pointer) {
+        if (m_dragging) {
+          m_dragFraction = fractionAt(pointer.localX);
+        }
+      });
+      m_area->setOnCancel([this] { m_dragging = false; });
+    }
+
+    // En cada cuadro: posición y duración en segundos; `dt` en segundos desde el anterior.
+    void step(double position, double duration, bool playing, float dt) {
+      const float s = m_scale;
+      const double fraction = duration > 0.0 ? std::clamp(position / duration, 0.0, 1.0) : 0.0;
+      float target = m_dragging ? m_dragFraction : static_cast<float>(fraction);
+      // Sonando, mpv a veces informa un poco por detrás de lo estimado: no retroceder por eso (un seek sí).
+      if (playing && !m_dragging && target < m_shown && (m_shown - target) * duration < 0.5) {
+        target = m_shown;
+      }
+      // Sigue a la posición de cerca (los saltos de un seek se deslizan en ~100 ms, el avance normal no se nota).
+      m_shown += (target - m_shown) * std::min(1.0F, dt / 0.06F);
+      m_amp += ((playing && !m_dragging ? 1.0F : 0.0F) - m_amp) * std::min(1.0F, dt / 0.18F);
+      m_phase = std::fmod(m_phase + dt * m_amp * m_wavelength / 1.4F, m_wavelength);
+
+      const float gap = 6.0F * s;
+      const float thumbW = m_thumb->width();
+      const float thumbX = m_shown * (width() - thumbW); // sin redondear: avanza en subpíxeles
+      m_thumb->setPosition(thumbX, m_thumb->y());
+      m_clip->setSize(std::max(0.0F, thumbX - gap), height());
+      const float trackX = thumbX + thumbW + gap;
+      m_track->setPosition(trackX, m_track->y());
+      m_track->setSize(std::max(0.0F, width() - trackX), m_track->height());
+      // La onda avanza hacia el indicador; al pausar se aplana (y la línea recta toma su lugar).
+      m_wave->setPosition(m_phase - m_wavelength, m_wave->y());
+      m_wave->setScale(1.0F, std::max(0.02F, m_amp));
+      m_wave->setOpacity(std::clamp(m_amp * 1.5F, 0.0F, 1.0F));
+      m_flat->setOpacity(std::clamp(1.0F - m_amp * 1.5F, 0.0F, 1.0F));
+    }
+
+    static constexpr float kHeight = 32.0F;
+
+  private:
+    [[nodiscard]] float fractionAt(float x) const {
+      const float span = std::max(1.0F, width() - m_thumb->width());
+      return std::clamp((x - m_thumb->width() * 0.5F) / span, 0.0F, 1.0F);
+    }
+
+    float m_scale;
+    SeekFn m_seek;
+    float m_wavelength = 40.0F;
+    RectNode* m_track = nullptr;
+    Node* m_clip = nullptr;
+    RectNode* m_flat = nullptr;
+    Image* m_wave = nullptr;
+    RectNode* m_thumb = nullptr;
+    InputArea* m_area = nullptr;
+    float m_shown = 0.0F;
+    float m_amp = 0.0F;
+    float m_phase = 0.0F;
+    bool m_dragging = false;
+    float m_dragFraction = 0.0F;
+  };
+
   class LyricsBlock final : public Node {
   public:
     LyricsBlock(float width, float margin, float gap, float spacer, float fontSize, float bigFontSize, ColorSpec color, bool depth)
@@ -1110,6 +1255,7 @@ namespace okaru::music {
     m_nowCover = nullptr;
     m_miniBackground = nullptr;
     m_lavaBlobs.clear();
+    m_wave = nullptr;
     m_lavaCover.clear();
     m_lavaTick.stop();
     m_nowTitle = nullptr;
@@ -2155,6 +2301,13 @@ namespace okaru::music {
       const float y = m_lavaHeight * (p.cy + p.ay * std::cos(t * p.sy + p.phase * 0.7F));
       blob->setPosition(std::round(x - blob->width() * 0.5F), std::round(y - blob->height() * 0.5F));
     }
+    const auto now = std::chrono::steady_clock::now();
+    const float dt = std::min(0.1F, std::chrono::duration<float>(now - m_lavaLast).count());
+    m_lavaLast = now;
+    if (m_wave != nullptr) {
+      const auto& state = m_player.state();
+      m_wave->step(estimatedPosition(), state.duration, !state.paused && !state.idle, dt);
+    }
     m_app.requestFrame();
   }
 
@@ -2184,7 +2337,8 @@ namespace okaru::music {
     root->addChild(ui::box({.fill = colorSpecFromRole(ColorRole::Surface, 0.25F), .width = width, .height = height}));
     applyLavaColors(track != nullptr ? track->cover : "");
     stepLava();
-    m_lavaTick.startRepeating(std::chrono::milliseconds(33), [this] { stepLava(); });
+    m_lavaLast = std::chrono::steady_clock::now();
+    m_lavaTick.startRepeating(std::chrono::milliseconds(16), [this] { stepLava(); });
 
     // Abajo: la canción (carátula y título grande) y, debajo, el tiempo y los controles.
     const float controlsHeight = 120.0F * scale;
@@ -2237,21 +2391,18 @@ namespace okaru::music {
     controls->addChild(ui::row(
         {.align = FlexAlign::Center, .gap = Style::spaceMd * scale, .width = barWidth},
         ui::label({.out = &m_positionLabel, .text = "0:00", .fontSize = Style::fontSizeBody * scale, .minWidth = 48.0F * scale, .textAlign = TextAlign::End}),
-        ui::slider({
-            .out = &m_timeline,
-            .minValue = 0.0,
-            .maxValue = 1.0,
-            .value = 0.0,
-            .trackHeight = 6.0F * scale,
-            .wheelAdjustEnabled = false,
-            .flexGrow = 1.0F,
-            .onValueChanged =
-                [this](double value) {
-                  if (!m_syncingTimeline) {
-                    m_player.seekTo(value);
-                  }
-                },
-        }),
+        [&]() -> std::unique_ptr<Node> {
+          Renderer* renderer = m_app.renderer();
+          if (renderer == nullptr) {
+            return ui::node({.flexGrow = 1.0F});
+          }
+          const float waveWidth = barWidth - (48.0F * 2.0F + Style::spaceMd * 2.0F) * scale;
+          auto wave = std::make_unique<WaveSeekBar>(*renderer, waveWidth, scale, m_app.bufferScale(), [this](double fraction) {
+            m_player.seekTo(fraction * m_player.state().duration);
+          });
+          m_wave = wave.get();
+          return wave;
+        }(),
         ui::label({.out = &m_durationLabel, .text = "0:00", .fontSize = Style::fontSizeBody * scale, .minWidth = 48.0F * scale})
     ));
     // Controles grandes centrados; salir, a la derecha.

@@ -46,6 +46,7 @@ namespace okaru::music {
 
   class CoverImage;
   class LyricsBlock;
+  class WaveSeekBar;
   class TrackListAdapter;
   class AlbumGridAdapter;
   class NameListAdapter;
@@ -227,6 +228,8 @@ namespace okaru::music {
     Timer m_lyricsTick;
     Timer m_lavaTick;
     std::vector<Image*> m_lavaBlobs;
+    WaveSeekBar* m_wave = nullptr;
+    std::chrono::steady_clock::time_point m_lavaLast = std::chrono::steady_clock::now();
     std::string m_lavaCover;
     float m_lavaWidth = 0.0F;
     float m_lavaHeight = 0.0F;
