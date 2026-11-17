@@ -246,6 +246,20 @@ namespace {
     assert(equalizerFilter(gains) == "lavfi=[volume=-6.0dB,equalizer=f=31:t=o:w=1:g=6.0,equalizer=f=16000:t=o:w=1:g=-12.0]");
   }
 
+  void testColors() {
+    // Mitad roja y mitad casi negra: salen los dos, el rojo (vivo) primero; la transparencia no cuenta.
+    std::vector<std::uint8_t> rgba;
+    for (int i = 0; i < 100; ++i) {
+      const bool red = i < 50;
+      rgba.insert(rgba.end(), {static_cast<std::uint8_t>(red ? 220 : 10), 10, 10, 255});
+    }
+    rgba.insert(rgba.end(), {0, 255, 0, 0});
+    const auto colors = dominantColors(rgba, 5);
+    assert(colors.size() == 2);
+    assert(colors[0][0] > 0.8F && colors[1][0] < 0.1F);
+    assert(dominantColors({}, 5).empty());
+  }
+
   void testScan() {
     const fs::path root = fs::temp_directory_path() / ("okaru-music-test-" + std::to_string(::getpid()));
     fs::remove_all(root);
@@ -315,6 +329,7 @@ int main() {
   testPlaylists();
   testRemote();
   testShuffle();
+  testColors();
   testScan();
   return 0;
 }

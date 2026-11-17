@@ -6,6 +6,7 @@
 
 #include "apps/music/music_state.h"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
@@ -137,6 +138,11 @@ namespace okaru::music {
   [[nodiscard]] Track
   readTrack(const std::filesystem::path& path, const std::filesystem::path& coversDir, const SourceOrder& sources = {});
   // Dónde va la carátula de esa canción (una por álbum; sin álbum, una por archivo).
+  // Colores principales de una imagen RGBA (los más presentes y distintos entre sí, de 0 a 1), para el fondo de
+  // la pantalla completa. Menos de `count` si la imagen tiene pocos colores; vacío si no tiene píxeles.
+  using Rgb = std::array<float, 3>;
+  [[nodiscard]] std::vector<Rgb> dominantColors(const std::vector<std::uint8_t>& rgba, std::size_t count);
+
   [[nodiscard]] std::filesystem::path coverPathFor(const Track& track, const std::filesystem::path& coversDir);
   // Reduce `sourceImage` a 512 px (recorte cuadrado) y la guarda como JPEG en `target`.
   bool storeCover(const std::string& sourceImage, const std::filesystem::path& target);

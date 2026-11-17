@@ -2,6 +2,9 @@
 
 #include "apps/common/okaru_app.h"
 #include "apps/common/portal_file_chooser.h"
+#include "render/core/image_file_loader.h"
+#include "render/core/texture_manager.h"
+#include "ui/controls/image.h"
 #include "core/deferred_call.h"
 #include "core/files/resource_paths.h"
 #include "core/input/key_modifiers.h"
@@ -1056,6 +1059,7 @@ namespace okaru::music {
       if (m_miniBackground != nullptr) {
         m_miniBackground->setCover(track != nullptr ? track->cover : "");
       }
+      applyLavaColors(track != nullptr ? track->cover : "");
       if (m_likeButton != nullptr) {
         m_likeButton->setGlyph(m_playlists.liked(item) ? "heart-filled" : "heart");
         m_likeButton->setEnabled(track != nullptr);
@@ -1105,6 +1109,9 @@ namespace okaru::music {
     m_search = nullptr;
     m_nowCover = nullptr;
     m_miniBackground = nullptr;
+    m_lavaBlobs.clear();
+    m_lavaCover.clear();
+    m_lavaTick.stop();
     m_nowTitle = nullptr;
     m_nowArtist = nullptr;
     m_playButton = nullptr;
@@ -2064,40 +2071,144 @@ namespace okaru::music {
     m_app.requestRebuild();
   }
 
+  namespace {
+    constexpr std::size_t kLavaBlobs = 5;
+    // Recorrido de cada mancha: centro (fracción de la ventana), amplitud y velocidad (rad/s) por eje, fase.
+    struct LavaPath {
+      float cx, cy, ax, ay, sx, sy, phase, size;
+    };
+    constexpr std::array<LavaPath, kLavaBlobs> kLavaPaths{{
+        {0.25F, 0.30F, 0.22F, 0.20F, 0.071F, 0.053F, 0.0F, 0.85F},
+        {0.75F, 0.25F, 0.20F, 0.24F, 0.059F, 0.083F, 1.7F, 0.75F},
+        {0.50F, 0.70F, 0.28F, 0.18F, 0.047F, 0.067F, 3.1F, 0.95F},
+        {0.15F, 0.80F, 0.18F, 0.22F, 0.089F, 0.043F, 4.4F, 0.65F},
+        {0.85F, 0.75F, 0.21F, 0.19F, 0.061F, 0.079F, 5.6F, 0.70F},
+    }};
+    // Mancha difusa: blanco con alfa que cae suave desde el centro (premultiplicado); se tiñe con setTint.
+    const std::vector<std::uint8_t>& lavaTexture(int size) {
+      static std::vector<std::uint8_t> pixels;
+      if (pixels.empty()) {
+        pixels.resize(static_cast<std::size_t>(size * size * 4));
+        const float half = static_cast<float>(size) * 0.5F;
+        for (int y = 0; y < size; ++y) {
+          for (int x = 0; x < size; ++x) {
+            const float dx = (static_cast<float>(x) + 0.5F - half) / half;
+            const float dy = (static_cast<float>(y) + 0.5F - half) / half;
+            const float d = std::min(1.0F, dx * dx + dy * dy);
+            const float falloff = (1.0F - d) * (1.0F - d);
+            const auto a = static_cast<std::uint8_t>(std::lround(falloff * 255.0F));
+            std::fill_n(pixels.begin() + (y * size + x) * 4, 4, a);
+          }
+        }
+      }
+      return pixels;
+    }
+    constexpr int kLavaTexture = 128;
+  } // namespace
+
+  void MusicWindow::applyLavaColors(const std::string& cover) {
+    if (m_lavaBlobs.empty() || cover == m_lavaCover) {
+      return;
+    }
+    m_lavaCover = cover;
+    std::vector<Rgb> colors;
+    if (!cover.empty()) {
+      if (auto image = loadImageFile(cover, 48)) {
+        colors = dominantColors(image->rgba, kLavaBlobs);
+      }
+    }
+    for (std::size_t i = 0; i < m_lavaBlobs.size(); ++i) {
+      if (colors.empty()) {
+        // Sin carátula: los colores del tema.
+        constexpr std::array<ColorRole, 3> roles{ColorRole::Primary, ColorRole::Tertiary, ColorRole::Secondary};
+        m_lavaBlobs[i]->setTint(resolveColorSpec(colorSpecFromRole(roles[i % roles.size()])));
+      } else {
+        const Rgb& c = colors[i % colors.size()];
+        m_lavaBlobs[i]->setTint(Color{c[0], c[1], c[2], 1.0F});
+      }
+    }
+    m_app.invalidate();
+  }
+
+  void MusicWindow::stepLava() {
+    const float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - m_lavaStart).count();
+    for (std::size_t i = 0; i < m_lavaBlobs.size(); ++i) {
+      const LavaPath& p = kLavaPaths[i];
+      Image* blob = m_lavaBlobs[i];
+      const float x = m_lavaWidth * (p.cx + p.ax * std::sin(t * p.sx + p.phase));
+      const float y = m_lavaHeight * (p.cy + p.ay * std::cos(t * p.sy + p.phase * 0.7F));
+      blob->setPosition(std::round(x - blob->width() * 0.5F), std::round(y - blob->height() * 0.5F));
+    }
+    m_app.requestFrame();
+  }
+
   std::unique_ptr<Node> MusicWindow::buildFullscreen(float width, float height, float scale) {
-    const float pad = Style::spaceLg * 2.0F * scale;
+    const float pad = Style::spaceLg * 3.0F * scale;
+    const Track* track = currentTrack();
+    const std::string item = m_player.currentItem();
     auto root = ui::node({.width = width, .height = height});
     root->addChild(ui::box({.fill = colorSpecFromRole(ColorRole::Surface), .width = width, .height = height}));
-    auto background = std::make_unique<CoverImage>();
-    background->setBlur(32);
-    background->setSize(width, height);
-    background->setOpacity(0.45F);
-    m_miniBackground = static_cast<CoverImage*>(root->addChild(std::move(background)));
 
-    // Abajo: barra de tiempo y controles; encima, a la izquierda, la carátula con el título grande.
-    const float controlsHeight = 96.0F * scale;
-    const float side = std::clamp(std::min(width, height) * 0.32F, 120.0F * scale, 420.0F * scale);
-    const float songTop = height - pad - controlsHeight - side;
+    // Lava: manchas grandes y difusas que se mueven despacio; encima, un velo para que el texto se lea.
+    m_lavaWidth = width;
+    m_lavaHeight = height;
+    const float base = std::max(width, height);
+    if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
+      const auto& texture = lavaTexture(kLavaTexture);
+      for (const LavaPath& path : kLavaPaths) {
+        const float size = std::round(base * path.size * 1.3F); // el borde se desvanece: más grande que se ve
+        auto blob = std::make_unique<Image>();
+        blob->setSourceRaw(*renderer, texture.data(), texture.size(), kLavaTexture, kLavaTexture, kLavaTexture * 4, PixmapFormat::RGBA);
+        blob->setFit(ImageFit::Stretch);
+        blob->setSize(size, size);
+        blob->setOpacity(0.85F);
+        m_lavaBlobs.push_back(static_cast<Image*>(root->addChild(std::move(blob))));
+      }
+    }
+    root->addChild(ui::box({.fill = colorSpecFromRole(ColorRole::Surface, 0.25F), .width = width, .height = height}));
+    applyLavaColors(track != nullptr ? track->cover : "");
+    stepLava();
+    m_lavaTick.startRepeating(std::chrono::milliseconds(33), [this] { stepLava(); });
+
+    // Abajo: la canción (carátula y título grande) y, debajo, el tiempo y los controles.
+    const float controlsHeight = 120.0F * scale;
+    const float side = std::clamp(std::min(width, height) * 0.30F, 120.0F * scale, 440.0F * scale);
+    const float songTop = height - pad - controlsHeight - side - Style::spaceLg * scale;
     auto cover = std::make_unique<CoverImage>();
     cover->setSize(side, side);
     cover->setPosition(pad, songTop);
     m_nowCover = static_cast<CoverImage*>(root->addChild(std::move(cover)));
 
-    const float textWidth = std::max(0.0F, width - side - pad * 3.0F);
+    // El texto va puesto antes de medir (si no, mide vacío y queda corrido); una línea cada uno: alto fijo.
+    const float textWidth = std::max(0.0F, width - side - pad * 2.0F - Style::spaceLg * 2.0F * scale);
     auto info = ui::column({.align = FlexAlign::Start, .gap = Style::spaceSm * scale, .width = textWidth});
-    info->addChild(ui::label({.out = &m_nowTitle, .text = "", .fontSize = Style::fontSizeHeader * 2.0F * scale, .fontWeight = FontWeight::Bold, .maxWidth = textWidth, .maxLines = 2}));
-    info->addChild(ui::label({.out = &m_nowArtist, .text = "", .fontSize = Style::fontSizeTitle * scale, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant), .maxWidth = textWidth, .maxLines = 1}));
+    info->addChild(ui::label({
+        .out = &m_nowTitle,
+        .text = track != nullptr ? track->title : (item.empty() ? tr("apps.music.nothing-playing") : fs::path(item).filename().string()),
+        .fontSize = Style::fontSizeHeader * 3.0F * scale,
+        .fontWeight = FontWeight::Bold,
+        .maxWidth = textWidth,
+        .maxLines = 1,
+    }));
+    info->addChild(ui::label({
+        .out = &m_nowArtist,
+        .text = track != nullptr ? joinDot({track->artist, track->album}) : "",
+        .fontSize = Style::fontSizeHeader * scale,
+        .color = colorSpecFromRole(ColorRole::OnSurfaceVariant),
+        .maxWidth = textWidth,
+        .maxLines = 1,
+    }));
     if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
       info->layout(*renderer);
     }
-    info->setPosition(side + pad * 2.0F, songTop + side - info->height());
+    info->setPosition(pad + side + Style::spaceLg * 2.0F * scale, songTop + side - info->height());
     root->addChild(std::move(info));
 
     const float barWidth = width - pad * 2.0F;
-    auto controls = ui::column({.align = FlexAlign::Center, .gap = Style::spaceXs * scale, .width = barWidth});
+    auto controls = ui::column({.align = FlexAlign::Center, .gap = Style::spaceMd * scale, .width = barWidth});
     controls->addChild(ui::row(
-        {.align = FlexAlign::Center, .gap = Style::spaceSm * scale, .width = barWidth},
-        ui::label({.out = &m_positionLabel, .text = "0:00", .fontSize = Style::fontSizeCaption * scale, .minWidth = 44.0F * scale, .textAlign = TextAlign::End}),
+        {.align = FlexAlign::Center, .gap = Style::spaceMd * scale, .width = barWidth},
+        ui::label({.out = &m_positionLabel, .text = "0:00", .fontSize = Style::fontSizeBody * scale, .minWidth = 48.0F * scale, .textAlign = TextAlign::End}),
         ui::slider({
             .out = &m_timeline,
             .minValue = 0.0,
@@ -2112,30 +2223,53 @@ namespace okaru::music {
                   }
                 },
         }),
-        ui::label({.out = &m_durationLabel, .text = "0:00", .fontSize = Style::fontSizeCaption * scale, .minWidth = 44.0F * scale})
+        ui::label({.out = &m_durationLabel, .text = "0:00", .fontSize = Style::fontSizeBody * scale, .minWidth = 48.0F * scale})
     ));
-    auto buttons = ui::row({.align = FlexAlign::Center, .gap = Style::spaceSm * scale});
-    buttons->addChild(ui::button({.out = &m_likeButton, .glyph = m_playlists.liked(m_player.currentItem()) ? "heart-filled" : "heart", .enabled = currentTrack() != nullptr, .variant = ButtonVariant::Ghost, .tooltip = tr("apps.music.like"), .onClick = [this] {
-                                    if (currentTrack() != nullptr) {
-                                      toggleLike(m_player.currentItem());
-                                    }
-                                  }}));
-    buttons->addChild(ui::button({.out = &m_shuffleButton, .glyph = "arrows-shuffle", .variant = ButtonVariant::Ghost, .tooltip = tr("apps.music.shuffle"), .onClick = [this] { m_player.setShuffle(!m_player.shuffled()); }}));
-    buttons->addChild(ui::button({.glyph = "player-track-prev", .variant = ButtonVariant::Ghost, .tooltip = tr("apps.music.previous"), .onClick = [this] { m_player.previous(); }}));
-    buttons->addChild(ui::button({.out = &m_playButton, .glyph = "player-play", .variant = ButtonVariant::Primary, .onClick = [this] { m_player.togglePause(); }}));
-    buttons->addChild(ui::button({.glyph = "player-track-next", .variant = ButtonVariant::Ghost, .tooltip = tr("apps.music.next"), .onClick = [this] { m_player.next(); }}));
-    buttons->addChild(ui::button({.out = &m_repeatButton, .glyph = "repeat", .variant = ButtonVariant::Ghost, .tooltip = tr("apps.music.repeat"), .onClick = [this] {
-                                    const Repeat next = m_player.repeat() == Repeat::Off ? Repeat::All
-                                        : m_player.repeat() == Repeat::All               ? Repeat::One
-                                                                                         : Repeat::Off;
-                                    m_player.setRepeat(next);
-                                  }}));
-    buttons->addChild(ui::button({.glyph = "minimize", .variant = ButtonVariant::Ghost, .tooltip = tr("apps.music.exit-fullscreen"), .onClick = [this] { setFullscreen(false); }}));
+    // Controles grandes centrados; salir, a la derecha.
+    const float glyph = 26.0F * scale;
+    const float button = 52.0F * scale;
+    auto buttons = ui::row({.align = FlexAlign::Center, .gap = Style::spaceMd * scale});
+    const auto control = [&](Button** out, const char* name, const std::string& tooltip, std::function<void()> click) {
+      buttons->addChild(ui::button({
+          .out = out,
+          .glyph = name,
+          .glyphSize = glyph,
+          .controlHeight = button,
+          .variant = ButtonVariant::Ghost,
+          .tooltip = tooltip,
+          .minWidth = button,
+          .onClick = std::move(click),
+      }));
+    };
+    control(&m_likeButton, m_playlists.liked(item) ? "heart-filled" : "heart", tr("apps.music.like"), [this] {
+      if (currentTrack() != nullptr) {
+        toggleLike(m_player.currentItem());
+      }
+    });
+    control(&m_shuffleButton, "arrows-shuffle", tr("apps.music.shuffle"), [this] { m_player.setShuffle(!m_player.shuffled()); });
+    control(nullptr, "player-track-prev", tr("apps.music.previous"), [this] { m_player.previous(); });
+    buttons->addChild(ui::button({
+        .out = &m_playButton,
+        .glyph = "player-play",
+        .glyphSize = glyph * 1.3F,
+        .controlHeight = button * 1.35F,
+        .variant = ButtonVariant::Primary,
+        .minWidth = button * 1.35F,
+        .onClick = [this] { m_player.togglePause(); },
+    }));
+    control(nullptr, "player-track-next", tr("apps.music.next"), [this] { m_player.next(); });
+    control(&m_repeatButton, "repeat", tr("apps.music.repeat"), [this] {
+      const Repeat next = m_player.repeat() == Repeat::Off ? Repeat::All
+          : m_player.repeat() == Repeat::All               ? Repeat::One
+                                                           : Repeat::Off;
+      m_player.setRepeat(next);
+    });
+    control(nullptr, "minimize", tr("apps.music.exit-fullscreen"), [this] { setFullscreen(false); });
     controls->addChild(std::move(buttons));
     if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
       controls->layout(*renderer);
     }
-    controls->setPosition(pad, height - pad * 0.5F - controls->height());
+    controls->setPosition(pad, height - pad - controls->height() + Style::spaceLg * scale);
     root->addChild(std::move(controls));
     return root;
   }

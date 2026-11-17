@@ -27,6 +27,7 @@
 
 class AnimationManager;
 class Button;
+class Image;
 class Flex;
 class ScrollView;
 class Input;
@@ -75,6 +76,9 @@ namespace okaru::music {
     // Pantalla completa (estilo Spotify): fondo con la carátula, la canción grande abajo y los controles.
     [[nodiscard]] std::unique_ptr<Node> buildFullscreen(float width, float height, float scale);
     void setFullscreen(bool fullscreen);
+    // Fondo de lava de la pantalla completa: manchas suaves con los colores de la carátula, moviéndose despacio.
+    void applyLavaColors(const std::string& cover);
+    void stepLava();
     [[nodiscard]] std::unique_ptr<Node> buildFullPlayer(float width, float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildQueuePanel(float width, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildLyricsPanel(float width, float scale);
@@ -221,6 +225,12 @@ namespace okaru::music {
     float m_lyricAnchor = -1.0F; // foco de atenuación de la letra (se desliza entre líneas)
     double m_stalePosition = -1.0; // posición de la canción anterior, hasta que llegue la de la nueva     // etiqueta que vuelve a su tamaño en la transición en curso
     Timer m_lyricsTick;
+    Timer m_lavaTick;
+    std::vector<Image*> m_lavaBlobs;
+    std::string m_lavaCover;
+    float m_lavaWidth = 0.0F;
+    float m_lavaHeight = 0.0F;
+    std::chrono::steady_clock::time_point m_lavaStart = std::chrono::steady_clock::now();
     double m_lastPosition = -1.0;
     std::chrono::steady_clock::time_point m_positionAt;
     float m_fullY = 0.0F;

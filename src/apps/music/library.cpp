@@ -802,4 +802,43 @@ namespace okaru::music {
     finish(organize(readAll(db.handle)));
   }
 
+  std::vector<Rgb> dominantColors(const std::vector<std::uint8_t>& rgba, std::size_t count) {
+    // Histograma de 8×8×8 cajas; los colores vivos pesan más que los grises, que suelen ser fondo.
+    struct Bin {
+      double r = 0, g = 0, b = 0, weight = 0;
+      std::size_t pixels = 0;
+    };
+    std::array<Bin, 512> bins{};
+    for (std::size_t i = 0; i + 3 < rgba.size(); i += 4) {
+      if (rgba[i + 3] < 128) {
+        continue;
+      }
+      const int r = rgba[i], g = rgba[i + 1], b = rgba[i + 2];
+      const double saturation = (std::max({r, g, b}) - std::min({r, g, b})) / 255.0;
+      Bin& bin = bins[static_cast<std::size_t>(((r >> 5) << 6) | ((g >> 5) << 3) | (b >> 5))];
+      bin.r += r;
+      bin.g += g;
+      bin.b += b;
+      bin.weight += 1.0 + saturation * 3.0;
+      ++bin.pixels;
+    }
+    std::ranges::sort(bins, std::greater{}, &Bin::weight);
+    std::vector<Rgb> out;
+    for (const Bin& bin : bins) {
+      if (bin.pixels == 0 || out.size() >= count) {
+        break;
+      }
+      const auto n = static_cast<double>(bin.pixels) * 255.0;
+      const Rgb color{static_cast<float>(bin.r / n), static_cast<float>(bin.g / n), static_cast<float>(bin.b / n)};
+      const bool distinct = std::ranges::none_of(out, [&](const Rgb& other) {
+        const float dr = color[0] - other[0], dg = color[1] - other[1], db = color[2] - other[2];
+        return dr * dr + dg * dg + db * db < 0.15F * 0.15F;
+      });
+      if (distinct) {
+        out.push_back(color);
+      }
+    }
+    return out;
+  }
+
 } // namespace okaru::music
