@@ -2190,14 +2190,14 @@ namespace okaru::music {
     const float controlsHeight = 120.0F * scale;
     const float side = std::clamp(std::min(width, height) * 0.30F, 120.0F * scale, 440.0F * scale);
     const float songTop = height - pad - controlsHeight - side - Style::spaceLg * scale;
-    // Velo en degradado desde la mitad de la carátula: el texto y los controles se leen sin un panel con borde.
+    // Velo en degradado desde algo arriba de la carátula: el texto y los controles se leen sin un panel con borde.
     if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
       const auto& texture = veilTexture();
       auto veil = std::make_unique<Image>();
       veil->setSourceRaw(*renderer, texture.data(), texture.size(), 1, kVeilTexture, 4, PixmapFormat::RGBA);
       veil->setFit(ImageFit::Stretch);
       veil->setTint(resolveColorSpec(colorSpecFromRole(ColorRole::Surface)));
-      const float veilTop = songTop + side * 0.4F;
+      const float veilTop = std::max(0.0F, songTop - side * 0.25F);
       veil->setSize(width, height - veilTop);
       veil->setPosition(0.0F, veilTop);
       root->addChild(std::move(veil));
