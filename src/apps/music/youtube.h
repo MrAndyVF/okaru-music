@@ -62,7 +62,6 @@ namespace okaru::music {
     std::string albumId; // "MPREb_…" o vacío
     std::string thumbnail;
     double duration = 0.0;
-    bool video = false; // videoclip o video de usuario (no la canción de YouTube Music)
   };
   // Encabezado de un álbum o una lista (para completar las canciones que no traen artista, álbum o carátula).
   struct YtHeader {

@@ -183,10 +183,11 @@ namespace okaru::music {
       }
     }
 
-    // Videoclip o video de usuario: el tipo que trae el enlace de reproducción (las canciones son "ATV").
+    // Videoclip, video de un canal o audio subido como episodio: el tipo que trae el enlace de reproducción (las
+    // canciones son "ATV").
     bool isVideo(const json* watchEndpoint) {
       const std::string type = text(path(*watchEndpoint, {"watchEndpointMusicSupportedConfigs", "watchEndpointMusicConfig", "musicVideoType"}));
-      return type == "MUSIC_VIDEO_TYPE_OMV" || type == "MUSIC_VIDEO_TYPE_UGC";
+      return type == "MUSIC_VIDEO_TYPE_OMV" || type == "MUSIC_VIDEO_TYPE_UGC" || type == "MUSIC_VIDEO_TYPE_PODCAST_EPISODE";
     }
 
     const json* first(const json& node, std::string_view key) {
@@ -361,10 +362,19 @@ namespace okaru::music {
       if (track.videoId.empty() || titleRuns == nullptr || titleRuns->empty() || !seen.insert(track.videoId).second) {
         continue; // un artista, un álbum o una lista en los resultados, no una canción
       }
-      track.title = text(path((*titleRuns)[0], {"text"}));
-      if (const json* watch = path((*titleRuns)[0], {"navigationEndpoint", "watchEndpoint"}); watch != nullptr) {
-        track.video = isVideo(watch);
+      if (text(path(*row, {"musicItemRendererDisplayPolicy"})) == "MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT") {
+        continue; // en gris en YouTube Music: ya no está disponible
       }
+      // Solo canciones de YouTube Music: videoclips y videos de canales fuera, aunque estén en «Me gusta». El tipo
+      // viene en el enlace del título o, si el título no enlaza, en el botón de reproducir de la carátula.
+      const json* watch = path((*titleRuns)[0], {"navigationEndpoint", "watchEndpoint"});
+      if (watch == nullptr) {
+        watch = path(*row, {"overlay", "musicItemThumbnailOverlayRenderer", "content", "musicPlayButtonRenderer", "playNavigationEndpoint", "watchEndpoint"});
+      }
+      if (watch != nullptr && isVideo(watch)) {
+        continue;
+      }
+      track.title = text(path((*titleRuns)[0], {"text"}));
       std::vector<std::string> artists;
       std::string plain; // primer texto suelto (artista sin enlace)
       for (std::size_t c = 1; c < columns->size(); ++c) {
@@ -530,9 +540,6 @@ namespace okaru::music {
         if (entry.contains("musicResponsiveListItemRenderer")) {
           // Fila de canción («Mixes de canciones»): la misma forma que la búsqueda.
           for (const YtTrack& track : parseYtTracks(entry)) {
-            if (track.video) {
-              continue;
-            }
             shelf.cards.push_back({.kind = YtCard::Kind::Song, .title = track.title,
                                    .subtitle = track.album.empty() ? track.artist : track.artist + " • " + track.album,
                                    .artist = track.artist, .album = track.album, .thumbnail = track.thumbnail,

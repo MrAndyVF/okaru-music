@@ -302,6 +302,14 @@ namespace {
                              col({run("El Nervio Del Volcán", "MUSIC_PAGE_TYPE_ALBUM", "MPREb_2")})}},
             {"fixedColumns", {{{"musicResponsiveListItemFixedColumnRenderer", {{"text", {{"runs", {run("1:02:03")}}}}}}}}}}}},
         {{"musicResponsiveListItemRenderer", {{"flexColumns", {col({run("Gustavo Cerati", "MUSIC_PAGE_TYPE_ARTIST", "UC1")})}}}}},
+        // Video de un canal (aunque esté en «Me gusta»): fuera.
+        {{"musicResponsiveListItemRenderer", {
+            {"flexColumns", {col({{{"text", "bad guy (Lyrics)"}, {"navigationEndpoint", {{"watchEndpoint", {{"videoId", "4-TbQnONe_w"},
+                {"watchEndpointMusicSupportedConfigs", {{"watchEndpointMusicConfig", {{"musicVideoType", "MUSIC_VIDEO_TYPE_UGC"}}}}}}}}}}}),
+                             col({run("7clouds")})}}}}},
+        // No disponible (en gris): fuera.
+        {{"musicResponsiveListItemRenderer", {{"musicItemRendererDisplayPolicy", "MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT"},
+            {"playlistItemData", {{"videoId", "lhYKJh37AgY"}}}, {"flexColumns", {col({run("Nuestro Anillito")}), col({run("Pastor López")})}}}}},
         {{"continuationItemRenderer", {{"continuationEndpoint", {{"continuationCommand", {{"token", "TOKEN"}}}}}}}},
     }}};
     const auto tracks = parseYtTracks(response);
@@ -311,6 +319,13 @@ namespace {
     assert(ytCoverSize(tracks[0].thumbnail, 544) == "https://x/a=w544-h544-l90-rj");
     assert(tracks[1].videoId == "abcdefghijk" && tracks[1].artist == "Caifanes, Saúl" && tracks[1].duration == 3723.0);
     assert(parseYtContinuation(response).token == "TOKEN" && parseYtContinuation(response).inBody);
+    // Audio de un canal con el tipo solo en el botón de la carátula (el título no enlaza): fuera.
+    nlohmann::json episode{{"musicResponsiveListItemRenderer", {{"playlistItemData", {{"videoId", "g1k-oT3VfCA"}}},
+        {"flexColumns", {col({run("Gangsta's Paradise (mix)")}), col({run("DonPartyEs")})}}}}};
+    episode["musicResponsiveListItemRenderer"]["overlay"]["musicItemThumbnailOverlayRenderer"]["content"]["musicPlayButtonRenderer"]
+           ["playNavigationEndpoint"]["watchEndpoint"]["watchEndpointMusicSupportedConfigs"]["watchEndpointMusicConfig"]
+           ["musicVideoType"] = "MUSIC_VIDEO_TYPE_PODCAST_EPISODE";
+    assert(parseYtTracks(nlohmann::json{{"contents", {episode}}}).empty());
     assert(parseYtDuration("12 M reproducciones") == 0.0);
 
     // Cookies: lectura, sesión iniciada, firma y formato para yt-dlp.
