@@ -573,11 +573,17 @@ namespace okaru::music {
       m_area->setOnCancel([this] { m_dragging = false; });
     }
 
-    // En cada cuadro: posición y duración en segundos; `dt` en segundos desde el anterior.
-    void step(double position, double duration, bool playing, float dt) {
+    // En cada cuadro: posición y duración en segundos; `dt` en segundos desde el anterior. false = quieta (en
+    // pausa y ya aplanada): no hace falta pintar otro cuadro.
+    bool step(double position, double duration, bool playing, float dt) {
       const float s = m_scale;
       const double fraction = duration > 0.0 ? std::clamp(position / duration, 0.0, 1.0) : 0.0;
       float target = m_dragging ? m_dragFraction : static_cast<float>(fraction);
+      if (m_first) { // recién construida: aparece ya en su sitio, sin deslizarse desde 0
+        m_first = false;
+        m_shown = target;
+        m_amp = playing ? 1.0F : 0.0F;
+      }
       // Sonando, mpv a veces informa un poco por detrás de lo estimado: no retroceder por eso (un seek sí).
       if (playing && !m_dragging && target < m_shown && (m_shown - target) * duration < 0.5) {
         target = m_shown;
@@ -600,6 +606,7 @@ namespace okaru::music {
       m_wave->setScale(1.0F, std::max(0.02F, m_amp));
       m_wave->setOpacity(std::clamp(m_amp * 1.5F, 0.0F, 1.0F));
       m_flat->setOpacity(std::clamp(1.0F - m_amp * 1.5F, 0.0F, 1.0F));
+      return playing || m_dragging || m_amp > 0.001F || std::abs(target - m_shown) > 1e-5F;
     }
 
     static constexpr float kHeight = 32.0F;
@@ -624,6 +631,7 @@ namespace okaru::music {
     float m_phase = 0.0F;
     bool m_dragging = false;
     float m_dragFraction = 0.0F;
+    bool m_first = true;
   };
 
   class LyricsBlock final : public Node {
@@ -779,6 +787,11 @@ namespace okaru::music {
     m_app.setBuild([this](float w, float h, float s) { return build(w, h, s); });
     m_app.setKeyHandler([this](const KeyboardEvent& event) { return onKey(event); });
     m_app.setAfterBuild([this] {
+      // Cada cuadro mueve la lava y la barra ondulada (si están en la escena).
+      if (m_wave != nullptr || !m_lavaBlobs.empty()) {
+        m_lavaLast = std::chrono::steady_clock::now();
+        m_frameTick.startRepeating(std::chrono::milliseconds(16), [this] { stepFrame(); });
+      }
       if (m_dialogInput != nullptr) {
         m_app.focus(m_dialogInput->inputArea());
       } else if (m_focusSearch && m_search != nullptr) {
@@ -1257,7 +1270,7 @@ namespace okaru::music {
     m_lavaBlobs.clear();
     m_wave = nullptr;
     m_lavaCover.clear();
-    m_lavaTick.stop();
+    m_frameTick.stop();
     m_nowTitle = nullptr;
     m_nowArtist = nullptr;
     m_playButton = nullptr;
@@ -2071,20 +2084,18 @@ namespace okaru::music {
         ui::row(
             {.align = FlexAlign::Center, .gap = Style::spaceSm * scale, .width = timelineWidth},
             ui::label({.out = &m_positionLabel, .text = "0:00", .fontSize = Style::fontSizeCaption * scale, .minWidth = 40.0F * scale, .textAlign = TextAlign::End}),
-            ui::slider({
-                .out = &m_timeline,
-                .minValue = 0.0,
-                .maxValue = 1.0,
-                .value = 0.0,
-                .wheelAdjustEnabled = false,
-                .flexGrow = 1.0F,
-                .onValueChanged =
-                    [this](double value) {
-                      if (!m_syncingTimeline) {
-                        m_player.seekTo(value);
-                      }
-                    },
-            }),
+            [&]() -> std::unique_ptr<Node> {
+              Renderer* renderer = m_app.renderer();
+              const float waveWidth = std::max(40.0F * scale, timelineWidth - (40.0F * 2.0F + Style::spaceSm * 2.0F) * scale);
+              if (renderer == nullptr) {
+                return ui::node({.width = waveWidth});
+              }
+              auto wave = std::make_unique<WaveSeekBar>(*renderer, waveWidth, scale, m_app.bufferScale(), [this](double fraction) {
+                m_player.seekTo(fraction * m_player.state().duration);
+              });
+              m_wave = wave.get();
+              return wave;
+            }(),
             ui::label({.out = &m_durationLabel, .text = "0:00", .fontSize = Style::fontSizeCaption * scale, .minWidth = 40.0F * scale})
         )
     );
@@ -2292,7 +2303,7 @@ namespace okaru::music {
     m_app.invalidate();
   }
 
-  void MusicWindow::stepLava() {
+  void MusicWindow::stepFrame() {
     const float t = std::chrono::duration<float>(std::chrono::steady_clock::now() - m_lavaStart).count();
     for (std::size_t i = 0; i < m_lavaBlobs.size(); ++i) {
       const LavaPath& p = kLavaPaths[i];
@@ -2304,11 +2315,14 @@ namespace okaru::music {
     const auto now = std::chrono::steady_clock::now();
     const float dt = std::min(0.1F, std::chrono::duration<float>(now - m_lavaLast).count());
     m_lavaLast = now;
+    bool moving = !m_lavaBlobs.empty();
     if (m_wave != nullptr) {
       const auto& state = m_player.state();
-      m_wave->step(estimatedPosition(), state.duration, !state.paused && !state.idle, dt);
+      moving = m_wave->step(estimatedPosition(), state.duration, !state.paused && !state.idle, dt) || moving;
     }
-    m_app.requestFrame();
+    if (moving) {
+      m_app.requestFrame();
+    }
   }
 
   std::unique_ptr<Node> MusicWindow::buildFullscreen(float width, float height, float scale) {
@@ -2336,9 +2350,7 @@ namespace okaru::music {
     }
     root->addChild(ui::box({.fill = colorSpecFromRole(ColorRole::Surface, 0.25F), .width = width, .height = height}));
     applyLavaColors(track != nullptr ? track->cover : "");
-    stepLava();
-    m_lavaLast = std::chrono::steady_clock::now();
-    m_lavaTick.startRepeating(std::chrono::milliseconds(16), [this] { stepLava(); });
+    stepFrame();
 
     // Abajo: la canción (carátula y título grande) y, debajo, el tiempo y los controles.
     const float controlsHeight = 120.0F * scale;
@@ -2530,7 +2542,10 @@ namespace okaru::music {
         .align = FlexAlign::Stretch,
         .gap = Style::spaceSm * scale,
         .padding = Style::spaceMd * scale,
-        .fill = colorSpecFromRole(ColorRole::SurfaceContainer, 0.85F),
+        // Borde y fondo casi opaco: el límite de la tarjeta se ve sobre cualquier carátula del fondo.
+        .fill = colorSpecFromRole(ColorRole::SurfaceContainer, 0.94F),
+        .radius = Style::spaceMd * scale,
+        .border = colorSpecFromRole(ColorRole::OutlineVariant),
         .width = panelWidth,
         .height = panelHeight,
     });
