@@ -171,7 +171,8 @@
         "new-playlist": "New playlist with this song…",
         "remove-from-playlist": "Remove from this playlist",
         "add-to-playlist": "Add to playlist",
-        "remove-from-queue": "Remove from queue"
+        "remove-from-queue": "Remove from queue",
+        "radio": "Start radio"
       },
       "servers": {
         "title": "Servers",
@@ -221,6 +222,17 @@
         "relogin": "Sign in again",
         "results": "On YouTube Music",
         "searching": "Searching…"
+      },
+      "for-you": {
+        "title": "For you",
+        "refresh": "Refresh recommendations",
+        "all": "See all",
+        "less": "See less",
+        "loading": "Loading your YouTube Music recommendations…",
+        "unavailable": "Could not load YouTube Music recommendations. Check the connection or sign in again in Settings.",
+        "connect": "Connect YouTube Music in Settings to get recommendations and mixes made for you.",
+        "recent": "Recently added",
+        "rediscover": "Rediscover"
       }
     }
   }

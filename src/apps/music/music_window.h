@@ -52,7 +52,7 @@ namespace okaru::music {
   class AlbumGridAdapter;
   class NameListAdapter;
 
-  enum class View : std::uint8_t { Albums, Artists, Songs, Genres, Settings, Playlist };
+  enum class View : std::uint8_t { Albums, Artists, Songs, Genres, Settings, Playlist, ForYou };
   // Pestañas del reproductor a pantalla completa.
   enum class PlayerTab : std::uint8_t { Queue, Lyrics };
 
@@ -116,6 +116,19 @@ namespace okaru::music {
     [[nodiscard]] std::unique_ptr<Node> buildItemTracks(std::vector<std::string> items, float scale);
     // Carátula de una canción que suena y no está en la biblioteca (resultado de YouTube Music).
     void fetchExtraCover(const std::string& item);
+    // Recomendaciones («Para ti»): portada de YouTube Music y estantes de la biblioteca.
+    [[nodiscard]] std::unique_ptr<Node> buildForYou(float width, float height, float scale);
+    void loadHome(bool force);
+    void playCard(const YtCard& card, const std::string& key);
+    // Radio de una canción (de YouTube Music, o buscada ahí por título y artista).
+    void startRadio(const std::string& path);
+    // Reproduce canciones que pueden no estar en la biblioteca (las recuerda para mostrarlas).
+    void playExtra(std::vector<Track> tracks, std::size_t start);
+    [[nodiscard]] const Server* youTubeServer() const;
+    // Carátula de una tarjeta: la ruta en la caché, o vacía mientras se descarga.
+    [[nodiscard]] std::string cardCover(const std::string& url);
+    // Resuelve por adelantado las próximas canciones de YouTube Music de la cola.
+    void prefetchUpcoming();
     [[nodiscard]] std::unique_ptr<Node> buildEmpty(float width, float height, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildTracks(std::vector<std::size_t> tracks, bool numbers, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildAlbums(std::vector<std::size_t> albums, float scale);
@@ -228,6 +241,14 @@ namespace okaru::music {
     std::unordered_map<std::string, std::size_t> m_allByPath;
     std::unordered_map<std::string, Track> m_extraTracks; // resultados de YouTube Music fuera de la biblioteca
     std::unordered_set<std::string> m_extraCovers;         // carátulas de esos resultados ya pedidas
+    std::unique_ptr<StreamResolver> m_streams;
+    std::vector<YtShelf> m_home;
+    bool m_homeLoading = false;
+    bool m_homeLoaded = false;
+    std::unordered_set<std::string> m_homeExpanded;               // estantes con «ver todo»
+    std::unordered_map<std::string, std::string> m_cardCovers;    // URL → carátula en la caché
+    std::unordered_set<std::string> m_cardCoversPending;
+    std::string m_cardLoading; // tarjeta que se está abriendo (muestra la ruedita)
 
     View m_view = View::Albums;
     Detail m_detail;

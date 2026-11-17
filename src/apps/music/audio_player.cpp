@@ -193,6 +193,49 @@ namespace okaru::music {
     }
   }
 
+  void AudioPlayer::retryFailed(std::int64_t entryId) {
+    // YouTube: una URL directa que venció o se rechazó, o "ytdl://" pedido antes de que el script de yt-dlp de
+    // mpv terminara de cargar (al abrir la app). Se vuelve a cargar en su lugar, una vez, y sigue desde ahí.
+    std::int64_t count = 0;
+    mpv_get_property(m_mpv, "playlist-count", MPV_FORMAT_INT64, &count);
+    for (std::int64_t i = 0; i < count; ++i) {
+      std::int64_t id = -1;
+      mpv_get_property(m_mpv, std::format("playlist/{}/id", i).c_str(), MPV_FORMAT_INT64, &id);
+      if (id != entryId) {
+        continue;
+      }
+      char* name = mpv_get_property_string(m_mpv, std::format("playlist/{}/filename", i).c_str());
+      const std::string url = name != nullptr ? name : "";
+      mpv_free(name);
+      const auto item = m_itemOf.find(url);
+      const bool youtube = url.starts_with("ytdl://") || url.contains(".googlevideo.com/");
+      if (!youtube || item == m_itemOf.end() || !m_retried.insert(url).second) {
+        return;
+      }
+      if (m_onStreamFailed) {
+        m_onStreamFailed(url); // olvida la URL directa: el reintento va por yt-dlp
+      }
+      m_retryTimer.start(std::chrono::milliseconds(800), [this, index = static_cast<std::size_t>(i), path = item->second] {
+        if (index >= m_state.queue.size() || m_state.queue[index] != path) {
+          return; // la cola cambió mientras tanto
+        }
+        command({"loadfile", playable(path), "insert-at", std::to_string(index)});
+        command({"playlist-remove", std::to_string(index + 1)});
+        command({"playlist-play-index", std::to_string(index)}); // la pausa se respeta
+      });
+      return;
+    }
+  }
+
+  void AudioPlayer::refreshItem(std::size_t index) {
+    if (index >= m_state.queue.size() || static_cast<std::int64_t>(index) == m_state.current) {
+      return;
+    }
+    const std::string item = m_state.queue[index];
+    command({"loadfile", playable(item), "insert-at", std::to_string(index)});
+    command({"playlist-remove", std::to_string(index + 1)});
+  }
+
   void AudioPlayer::clearQueue() {
     m_original.clear();
     command({"stop"});
@@ -323,6 +366,7 @@ namespace okaru::music {
         const auto* end = static_cast<mpv_event_end_file*>(event->data);
         if (end->reason == MPV_END_FILE_REASON_ERROR) {
           kLog.warn("mpv: {}", mpv_error_string(end->error));
+          retryFailed(end->playlist_entry_id);
         }
         break;
       }

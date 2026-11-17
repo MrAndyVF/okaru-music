@@ -13,9 +13,19 @@
 #include <nlohmann/json_fwd.hpp>
 #include <sys/types.h>
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace okaru::music {
@@ -70,10 +80,73 @@ namespace okaru::music {
     bool inBody = true;
   };
   [[nodiscard]] YtContinuation parseYtContinuation(const nlohmann::json& response);
+  // Canciones de la radio de una canción (endpoint "next": playlistPanelVideoRenderer).
+  [[nodiscard]] std::vector<YtTrack> parseYtPanel(const nlohmann::json& response);
+
+  // Portada de YouTube Music: estantes de tarjetas (canciones, álbumes o listas).
+  struct YtCard {
+    enum class Kind : std::uint8_t { Song, Album, Playlist };
+    Kind kind = Kind::Song;
+    std::string title;
+    std::string subtitle;
+    std::string thumbnail;
+    std::string videoId;  // canción
+    std::string browseId; // álbum ("MPREb_…") o lista ("VL…")
+  };
+  struct YtShelf {
+    std::string title;
+    std::vector<YtCard> cards;
+  };
+  [[nodiscard]] std::vector<YtShelf> parseYtHome(const nlohmann::json& response);
+
   // "3:54" → 234; "1:02:03" → 3723; otra cosa → 0.
   [[nodiscard]] double parseYtDuration(const std::string& value);
   // Miniatura en tamaño de carátula (las de googleusercontent llevan el tamaño en la URL).
   [[nodiscard]] std::string ytCoverSize(const std::string& url, int size);
+
+  // URL directas de audio, resueltas por adelantado con yt-dlp (unos 3,5 s por canción) en un hilo aparte: así
+  // la siguiente canción de la cola ya está lista cuando toca. Una URL recién resuelta tarda ~2 s en valer
+  // (YouTube responde 403 antes), y vence a las horas (parámetro "expire").
+  class StreamResolver {
+  public:
+    // Se llama en el hilo principal cuando una canción queda lista.
+    using ReadyFn = std::function<void(const std::string& videoId)>;
+
+    explicit StreamResolver(ReadyFn ready);
+    ~StreamResolver();
+    StreamResolver(const StreamResolver&) = delete;
+    StreamResolver& operator=(const StreamResolver&) = delete;
+
+    void setCookies(std::string file);
+    // La URL lista y vigente, o vacía.
+    [[nodiscard]] std::string cached(const std::string& videoId) const;
+    // Agrega a la fila las que falten (en orden); las ya listas o en camino se ignoran.
+    void prefetch(const std::vector<std::string>& videoIds);
+    // Una URL que mpv no pudo abrir (venció, cambió la red): se olvida.
+    void forget(const std::string& url);
+
+  private:
+    void run();
+
+    struct Entry {
+      std::string url;
+      std::chrono::system_clock::time_point expires;
+    };
+    mutable std::mutex m_mutex;
+    std::condition_variable m_wake;
+    std::deque<std::string> m_queue;
+    std::unordered_set<std::string> m_pending;
+    std::unordered_map<std::string, Entry> m_cache;
+    std::string m_cookies;
+    bool m_stop = false;
+    ReadyFn m_ready;
+    std::shared_ptr<std::atomic<bool>> m_alive = std::make_shared<std::atomic<bool>>(true);
+    std::atomic<pid_t> m_child{-1}; // yt-dlp en curso (se termina al cerrar)
+    std::thread m_thread; // al final: arranca con todo lo demás ya construido
+  };
+
+  // Un videoId válido (11 caracteres de [A-Za-z0-9_-]).
+  [[nodiscard]] bool isVideoId(const std::string& id);
 
   // Inicio de sesión con un perfil aislado del navegador elegido.
   class YouTubeLogin {

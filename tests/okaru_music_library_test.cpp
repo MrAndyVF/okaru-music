@@ -6,6 +6,7 @@
 #include "apps/music/playlists.h"
 #include "apps/music/servers.h"
 #include "apps/music/youtube.h"
+#include "apps/music/recommendations.h"
 #include "core/deferred_call.h"
 
 #include <algorithm>
@@ -354,6 +355,58 @@ namespace {
     fs::remove_all(profile);
   }
 
+  void testRecommendations() {
+    // Radio ("next"): título, artista enlazado, álbum, duración; sin repetir.
+    const auto link = [](const std::string& text, const std::string& type, const std::string& id) {
+      return nlohmann::json{{"text", text}, {"navigationEndpoint", {{"browseEndpoint", {{"browseId", id},
+          {"browseEndpointContextSupportedConfigs", {{"browseEndpointContextMusicConfig", {{"pageType", type}}}}}}}}}};
+    };
+    const nlohmann::json item{{"playlistPanelVideoRenderer", {
+        {"videoId", "YVXNPPdh6wE"}, {"title", {{"runs", {{{"text", "Crimen"}}}}}},
+        {"longBylineText", {{"runs", {link("Gustavo Cerati", "MUSIC_PAGE_TYPE_ARTIST", "UC1"), {{"text", " • "}},
+                                      link("Ahí Vamos", "MUSIC_PAGE_TYPE_ALBUM", "MPREb_1"), {{"text", " • "}}, {{"text", "2006"}}}}}},
+        {"lengthText", {{"runs", {{{"text", "3:53"}}}}}}}}};
+    const auto radio = parseYtPanel(nlohmann::json{{"items", {item, item}}});
+    assert(radio.size() == 1 && radio[0].title == "Crimen" && radio[0].artist == "Gustavo Cerati");
+    assert(radio[0].album == "Ahí Vamos" && radio[0].duration == 233.0);
+    assert(isVideoId("YVXNPPdh6wE") && !isVideoId("x; rm -rf /") && !isVideoId("short"));
+
+    // Portada: canción, álbum y lista; los artistas (ni canción ni lista) se saltan.
+    const auto two = [](const std::string& title, nlohmann::json nav) {
+      return nlohmann::json{{"musicTwoRowItemRenderer", {{"title", {{"runs", {{{"text", title}}}}}},
+          {"subtitle", {{"runs", {{{"text", "Canción"}}, {{"text", " • "}}, {{"text", "Artista"}}}}}}, {"navigationEndpoint", std::move(nav)}}}};
+    };
+    const auto browse = [](const std::string& id, const std::string& type) {
+      return nlohmann::json{{"browseEndpoint", {{"browseId", id},
+          {"browseEndpointContextSupportedConfigs", {{"browseEndpointContextMusicConfig", {{"pageType", type}}}}}}}};
+    };
+    const nlohmann::json home{{"contents", {{{"musicCarouselShelfRenderer", {
+        {"header", {{"musicCarouselShelfBasicHeaderRenderer", {{"title", {{"runs", {{{"text", "Vuelve a escucharlo"}}}}}}}}}},
+        {"contents", {two("Adiós", {{"watchEndpoint", {{"videoId", "217Bw85-5cw"}}}}),
+                      two("Ahí Vamos", browse("MPREb_1", "MUSIC_PAGE_TYPE_ALBUM")),
+                      two("Mi supermix", browse("VLRDTMAK5", "MUSIC_PAGE_TYPE_PLAYLIST")),
+                      two("Cerati", browse("UC1", "MUSIC_PAGE_TYPE_ARTIST"))}}}}}}}};
+    const auto shelves = parseYtHome(home);
+    assert(shelves.size() == 1 && shelves[0].title == "Vuelve a escucharlo" && shelves[0].cards.size() == 3);
+    assert(shelves[0].cards[0].kind == YtCard::Kind::Song && shelves[0].cards[0].videoId == "217Bw85-5cw");
+    assert(shelves[0].cards[0].subtitle == "Canción • Artista");
+    assert(shelves[0].cards[1].kind == YtCard::Kind::Album && shelves[0].cards[2].kind == YtCard::Kind::Playlist);
+
+    // Biblioteca: recientes por fecha del archivo (los de servidores no cuentan); redescubre estable por día.
+    Model model;
+    for (int i = 0; i < 4; ++i) {
+      Track t;
+      t.path = i < 3 ? "/m/" + std::to_string(i) : "yt://s/_/abcdefghijk";
+      t.album = "A" + std::to_string(i);
+      t.mtime = i < 3 ? 100 + i : 0;
+      model.tracks.push_back(t);
+      model.albums.push_back({.title = t.album, .tracks = {static_cast<std::size_t>(i)}});
+    }
+    assert((recentAlbums(model, 2) == std::vector<std::size_t>{2, 1}));
+    assert(recentAlbums(model, 10).size() == 3);
+    assert(rediscoverAlbums(model, 3, 7) == rediscoverAlbums(model, 3, 7) && rediscoverAlbums(model, 10, 1).size() == 4);
+  }
+
   void testScan() {
     const fs::path root = fs::temp_directory_path() / ("okaru-music-test-" + std::to_string(::getpid()));
     fs::remove_all(root);
@@ -425,6 +478,7 @@ int main() {
   testShuffle();
   testColors();
   testYouTube();
+  testRecommendations();
   testScan();
   return 0;
 }

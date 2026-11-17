@@ -1,11 +1,14 @@
 #include "apps/music/youtube.h"
 
+#include "core/deferred_call.h"
 #include "core/log.h"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <csignal>
+#include <fcntl.h>
+#include <unistd.h>
 #include <cstring>
 #include <ctime>
 #include <format>
@@ -447,6 +450,261 @@ namespace okaru::music {
       return {.token = text(path(*next, {"continuation"})), .inBody = false};
     }
     return {};
+  }
+
+  std::vector<YtTrack> parseYtPanel(const json& response) {
+    std::vector<const json*> items;
+    collect(response, "playlistPanelVideoRenderer", items);
+    std::vector<YtTrack> out;
+    std::unordered_set<std::string> seen;
+    for (const json* item : items) {
+      YtTrack track;
+      track.videoId = text(path(*item, {"videoId"}));
+      const json* title = path(*item, {"title", "runs"});
+      if (!isVideoId(track.videoId) || title == nullptr || !title->is_array() || title->empty() || !seen.insert(track.videoId).second) {
+        continue;
+      }
+      track.title = text(path((*title)[0], {"text"}));
+      std::vector<std::string> artists;
+      if (const json* runs = path(*item, {"longBylineText", "runs"}); runs != nullptr && runs->is_array()) {
+        for (const json& run : *runs) {
+          const std::string type = pageType(run);
+          if (type == "MUSIC_PAGE_TYPE_ARTIST" || type == "MUSIC_PAGE_TYPE_USER_CHANNEL") {
+            artists.push_back(text(path(run, {"text"})));
+          } else if (type == "MUSIC_PAGE_TYPE_ALBUM") {
+            track.album = text(path(run, {"text"}));
+            track.albumId = text(path(run, {"navigationEndpoint", "browseEndpoint", "browseId"}));
+          }
+        }
+        if (artists.empty() && !runs->empty()) {
+          track.artist = text(path((*runs)[0], {"text"}));
+        }
+      }
+      track.artistLinked = !artists.empty();
+      for (const std::string& artist : artists) {
+        track.artist += (track.artist.empty() ? "" : ", ") + artist;
+      }
+      if (const json* length = path(*item, {"lengthText", "runs"}); length != nullptr && length->is_array() && !length->empty()) {
+        track.duration = parseYtDuration(text(path((*length)[0], {"text"})));
+      }
+      if (const json* thumb = path(*item, {"thumbnail"}); thumb != nullptr) {
+        track.thumbnail = lastThumbnail(*thumb);
+      }
+      out.push_back(std::move(track));
+    }
+    return out;
+  }
+
+  std::vector<YtShelf> parseYtHome(const json& response) {
+    std::vector<const json*> shelves;
+    collect(response, "musicCarouselShelfRenderer", shelves);
+    std::vector<YtShelf> out;
+    for (const json* node : shelves) {
+      YtShelf shelf;
+      if (const json* runs = path(*node, {"header", "musicCarouselShelfBasicHeaderRenderer", "title", "runs"});
+          runs != nullptr && runs->is_array()) {
+        for (const json& run : *runs) {
+          shelf.title += text(path(run, {"text"}));
+        }
+      }
+      const json* contents = path(*node, {"contents"});
+      if (contents == nullptr || !contents->is_array()) {
+        continue;
+      }
+      for (const json& entry : *contents) {
+        if (entry.contains("musicResponsiveListItemRenderer")) {
+          // Fila de canción («Mixes de canciones»): la misma forma que la búsqueda.
+          for (const YtTrack& track : parseYtTracks(entry)) {
+            shelf.cards.push_back({.kind = YtCard::Kind::Song, .title = track.title,
+                                   .subtitle = track.album.empty() ? track.artist : track.artist + " • " + track.album,
+                                   .thumbnail = track.thumbnail, .videoId = track.videoId});
+          }
+          continue;
+        }
+        const json* item = path(entry, {"musicTwoRowItemRenderer"});
+        if (item == nullptr) {
+          continue;
+        }
+        YtCard card;
+        if (const json* runs = path(*item, {"title", "runs"}); runs != nullptr && runs->is_array() && !runs->empty()) {
+          card.title = text(path((*runs)[0], {"text"}));
+        }
+        if (const json* runs = path(*item, {"subtitle", "runs"}); runs != nullptr && runs->is_array()) {
+          for (const json& run : *runs) {
+            card.subtitle += text(path(run, {"text"}));
+          }
+        }
+        if (const json* thumb = path(*item, {"thumbnailRenderer"}); thumb != nullptr) {
+          card.thumbnail = lastThumbnail(*thumb);
+        }
+        const json* nav = path(*item, {"navigationEndpoint"});
+        if (nav == nullptr) {
+          continue;
+        }
+        card.videoId = text(path(*nav, {"watchEndpoint", "videoId"}));
+        const std::string browse = text(path(*nav, {"browseEndpoint", "browseId"}));
+        const std::string type = text(path(*nav, {"browseEndpoint", "browseEndpointContextSupportedConfigs",
+                                                   "browseEndpointContextMusicConfig", "pageType"}));
+        if (isVideoId(card.videoId)) {
+          card.kind = YtCard::Kind::Song;
+        } else if (type == "MUSIC_PAGE_TYPE_ALBUM" && !browse.empty()) {
+          card.kind = YtCard::Kind::Album;
+          card.browseId = browse;
+        } else if (type == "MUSIC_PAGE_TYPE_PLAYLIST" && !browse.empty()) {
+          card.kind = YtCard::Kind::Playlist;
+          card.browseId = browse;
+        } else {
+          continue; // artistas, podcasts y lo demás: no se reproducen como una lista de canciones
+        }
+        shelf.cards.push_back(std::move(card));
+      }
+      if (!shelf.cards.empty()) {
+        out.push_back(std::move(shelf));
+      }
+    }
+    return out;
+  }
+
+  bool isVideoId(const std::string& id) {
+    return id.size() == 11 && std::ranges::all_of(id, [](char c) {
+             return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+           });
+  }
+
+  // ── URL directas ──────────────────────────────────────────────────────────────────────────────────
+
+  namespace {
+
+    // Salida estándar de un programa (sin shell); vacía si no terminó bien. `child` = su pid mientras corre.
+    std::string capture(const std::vector<std::string>& args, std::atomic<pid_t>& child) {
+      int fds[2];
+      if (pipe2(fds, O_CLOEXEC) != 0) {
+        return {};
+      }
+      posix_spawn_file_actions_t actions;
+      posix_spawn_file_actions_init(&actions);
+      posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
+      posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+      std::vector<char*> argv;
+      for (const auto& arg : args) {
+        argv.push_back(const_cast<char*>(arg.c_str()));
+      }
+      argv.push_back(nullptr);
+      pid_t pid = -1;
+      const int rc = posix_spawnp(&pid, argv[0], &actions, nullptr, argv.data(), environ);
+      posix_spawn_file_actions_destroy(&actions);
+      ::close(fds[1]);
+      std::string out;
+      if (rc == 0) {
+        child = pid;
+        std::array<char, 4096> buffer{};
+        ssize_t n = 0;
+        while ((n = ::read(fds[0], buffer.data(), buffer.size())) > 0) {
+          out.append(buffer.data(), static_cast<std::size_t>(n));
+        }
+      }
+      ::close(fds[0]);
+      int status = 0;
+      if (rc == 0) {
+        waitpid(pid, &status, 0);
+        child = -1;
+      }
+      return rc == 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? out : std::string();
+    }
+
+  } // namespace
+
+  StreamResolver::StreamResolver(ReadyFn ready) : m_ready(std::move(ready)), m_thread([this] { run(); }) {}
+
+  StreamResolver::~StreamResolver() {
+    {
+      const std::lock_guard lock(m_mutex);
+      m_stop = true;
+    }
+    *m_alive = false;
+    m_wake.notify_all();
+    if (const pid_t child = m_child; child > 0) {
+      ::kill(child, SIGTERM); // no esperar a que yt-dlp termine para cerrar la app
+    }
+    m_thread.join();
+  }
+
+  void StreamResolver::setCookies(std::string file) {
+    const std::lock_guard lock(m_mutex);
+    m_cookies = std::move(file);
+  }
+
+  std::string StreamResolver::cached(const std::string& videoId) const {
+    const std::lock_guard lock(m_mutex);
+    const auto it = m_cache.find(videoId);
+    return it != m_cache.end() && std::chrono::system_clock::now() < it->second.expires ? it->second.url : std::string();
+  }
+
+  void StreamResolver::prefetch(const std::vector<std::string>& videoIds) {
+    const std::lock_guard lock(m_mutex);
+    const auto now = std::chrono::system_clock::now();
+    for (const std::string& id : videoIds) {
+      const auto it = m_cache.find(id);
+      if (!isVideoId(id) || m_pending.contains(id) || (it != m_cache.end() && now < it->second.expires)) {
+        continue;
+      }
+      m_pending.insert(id);
+      m_queue.push_back(id);
+    }
+    m_wake.notify_all();
+  }
+
+  void StreamResolver::forget(const std::string& url) {
+    const std::lock_guard lock(m_mutex);
+    std::erase_if(m_cache, [&](const auto& entry) { return entry.second.url == url; });
+  }
+
+  void StreamResolver::run() {
+    static const std::regex kExpire(R"([?&]expire=(\d+))");
+    while (true) {
+      std::string id;
+      std::string cookies;
+      {
+        std::unique_lock lock(m_mutex);
+        m_wake.wait(lock, [this] { return m_stop || !m_queue.empty(); });
+        if (m_stop) {
+          return;
+        }
+        id = std::move(m_queue.front());
+        m_queue.pop_front();
+        cookies = m_cookies;
+      }
+      std::vector<std::string> args{"yt-dlp", "-q", "--no-warnings", "--no-playlist", "-f", "bestaudio/best", "-g"};
+      if (!cookies.empty()) {
+        args.insert(args.end(), {"--cookies", cookies});
+      }
+      args.insert(args.end(), {"--", "https://music.youtube.com/watch?v=" + id});
+      std::string url = capture(args, m_child);
+      url = url.substr(0, url.find('\n'));
+      std::smatch m;
+      const bool ok = url.starts_with("https://") && std::regex_search(url, m, kExpire);
+      std::unique_lock lock(m_mutex);
+      if (ok) {
+        // Recién resuelta YouTube la rechaza (403) unos 2 s: se ofrece después de 3.
+        m_wake.wait_for(lock, std::chrono::seconds(3), [this] { return m_stop; });
+        if (m_stop) {
+          return;
+        }
+        const auto expires = std::chrono::system_clock::time_point(std::chrono::seconds(std::stoll(m[1].str())));
+        m_cache[id] = {.url = url, .expires = expires - std::chrono::minutes(10)};
+      } else {
+        kLog.debug("yt-dlp could not resolve {}", id);
+      }
+      m_pending.erase(id);
+      lock.unlock();
+      if (ok) {
+        DeferredCall::callLater([alive = m_alive, ready = m_ready, id] {
+          if (*alive) {
+            ready(id);
+          }
+        });
+      }
+    }
   }
 
   // ── Inicio de sesión ──────────────────────────────────────────────────────────────────────────────

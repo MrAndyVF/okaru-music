@@ -25,6 +25,8 @@ namespace okaru::apps {
 namespace okaru::music {
 
   struct Track;
+  struct YtShelf;
+  struct YtHeader;
 
   // YouTube Music se trata como un servidor más: su «secreto» son las cookies de la sesión (ver youtube.h).
   enum class ServerKind : std::uint8_t { Jellyfin, Subsonic, YouTube };
@@ -83,6 +85,12 @@ namespace okaru::music {
     void setYouTubeSession(const Server& server, const std::string& cookies);
     // Canciones del catálogo de YouTube Music (no solo de la biblioteca).
     void searchYouTube(const Server& server, const std::string& query, SearchFn done);
+    // Recomendaciones: los estantes de la portada de YouTube Music (varias páginas).
+    void youTubeHome(const Server& server, std::function<void(bool ok, std::vector<YtShelf> shelves)> done);
+    // Canciones de un álbum ("MPREb_…") o una lista ("VL…"; las automáticas "VLRD…" van por la radio).
+    void youTubeTracks(const Server& server, const std::string& browseId, SearchFn done);
+    // Radio de una canción: ella primero y luego las que YouTube Music le pone después.
+    void youTubeRadio(const Server& server, const std::string& videoId, SearchFn done);
     // Archivo de cookies para yt-dlp (en XDG_RUNTIME_DIR, solo del usuario); vacío sin sesión.
     [[nodiscard]] const std::string& ytdlCookies() const noexcept { return m_ytdlCookies; }
 
@@ -100,6 +108,10 @@ namespace okaru::music {
     void ytRequest(const Server& server, const std::string& endpoint, const std::string& extra, nlohmann::json body,
                    std::function<void(bool ok, nlohmann::json response)> done);
     void ytNext(std::shared_ptr<YtSync> sync);
+    void ytHomePage(const Server& server, std::shared_ptr<std::vector<YtShelf>> shelves, std::string token, int page,
+                    std::function<void(bool ok, std::vector<YtShelf> shelves)> done);
+    void ytPages(const Server& server, std::string browseId, std::string token, bool inBody, int page,
+                 std::shared_ptr<std::vector<Track>> out, struct YtHeader header, SearchFn done);
     void ytBrowse(std::shared_ptr<YtSync> sync, std::string browseId, std::string token, bool tokenInBody, int page);
     [[nodiscard]] Track ytTrack(const Server& server, const struct YtTrack& yt);
     void writeYtdlCookies();

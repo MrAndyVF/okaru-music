@@ -14,6 +14,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 struct mpv_handle;
@@ -72,6 +73,8 @@ namespace okaru::music {
     [[nodiscard]] const std::string& currentItem() const;
 
     void setOnChange(ChangeFn callback) { m_onChange = std::move(callback); }
+    // Una URL de YouTube (directa o "ytdl://") que mpv no pudo abrir; se reintenta una vez en su lugar.
+    void setOnStreamFailed(std::function<void(const std::string& url)> callback) { m_onStreamFailed = std::move(callback); }
     // Lo que mpv abre para una ruta de la biblioteca (las de servidores son URL de streaming). La cola sigue
     // hablando en rutas: las URL se traducen de vuelta al leer la lista de mpv.
     void setResolver(std::function<std::string(const std::string&)> resolver) { m_resolver = std::move(resolver); }
@@ -82,6 +85,9 @@ namespace okaru::music {
     void append(const std::vector<std::string>& items);
     void playNext(const std::vector<std::string>& items);
     void removeAt(std::size_t index);
+    // Vuelve a cargar la entrada `index` con lo que hoy da el resolutor (p. ej. la URL ya resuelta por
+    // adelantado), en el mismo lugar. La que suena no se toca.
+    void refreshItem(std::size_t index);
     void clearQueue();
     void next();
     // Con más de 3 s reproducidos vuelve al principio de la canción; si no, a la anterior.
@@ -112,6 +118,7 @@ namespace okaru::music {
     void stepCrossfade();
     void finishCrossfade();
     void drainEvents();
+    void retryFailed(std::int64_t entryId);
     void onProperty(const char* name, int format, void* data);
     void command(const std::vector<std::string>& args);
     // Ruta → lo que abre mpv (y lo recuerda para traducir de vuelta).
@@ -122,6 +129,9 @@ namespace okaru::music {
     mpv_handle* m_mpv = nullptr;
     PlayerState m_state;
     ChangeFn m_onChange;
+    std::function<void(const std::string&)> m_onStreamFailed;
+    Timer m_retryTimer;
+    std::unordered_set<std::string> m_retried; // URL ya reintentadas (una vez cada una)
     bool m_shuffled = false;
     Repeat m_repeat = Repeat::Off;
     std::vector<std::string> m_original; // la cola sin mezclar, para volver a ella

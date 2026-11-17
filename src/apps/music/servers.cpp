@@ -658,6 +658,115 @@ namespace okaru::music {
     });
   }
 
+  void RemoteSources::youTubeHome(const Server& server, std::function<void(bool ok, std::vector<YtShelf> shelves)> done) {
+    ytHomePage(server, std::make_shared<std::vector<YtShelf>>(), {}, 0, std::move(done));
+  }
+
+  void RemoteSources::ytHomePage(
+      const Server& server, std::shared_ptr<std::vector<YtShelf>> shelves, std::string token, int page,
+      std::function<void(bool ok, std::vector<YtShelf> shelves)> done
+  ) {
+    constexpr int kHomePages = 4; // la primera y tres más: unos 11 estantes
+    nlohmann::json body = nlohmann::json::object();
+    std::string extra;
+    if (token.empty()) {
+      body["browseId"] = "FEmusic_home";
+    } else {
+      extra = std::format("&ctoken={0}&continuation={0}&type=next", token);
+    }
+    ytRequest(server, "browse", extra, std::move(body), [this, server, shelves, page, done = std::move(done)](bool ok, nlohmann::json response) mutable {
+      if (!ok) {
+        done(page > 0, std::move(*shelves)); // lo que alcanzó a llegar
+        return;
+      }
+      for (YtShelf& shelf : parseYtHome(response)) {
+        shelves->push_back(std::move(shelf));
+      }
+      const YtContinuation next = parseYtContinuation(response);
+      if (!next.token.empty() && page + 1 < kHomePages) {
+        ytHomePage(server, std::move(shelves), next.token, page + 1, std::move(done));
+      } else {
+        done(true, std::move(*shelves));
+      }
+    });
+  }
+
+  void RemoteSources::youTubeTracks(const Server& server, const std::string& browseId, SearchFn done) {
+    if (browseId.starts_with("VLRD")) {
+      // Mixes y radios: listas que arma YouTube al pedirlas, no se pueden leer como una lista guardada.
+      ytRequest(
+          server, "next", "", {{"playlistId", browseId.substr(2)}, {"isAudioOnly", true}},
+          [this, server, done = std::move(done)](bool ok, nlohmann::json response) {
+            std::vector<Track> tracks;
+            for (const YtTrack& yt : ok ? parseYtPanel(response) : std::vector<YtTrack>{}) {
+              tracks.push_back(ytTrack(server, yt));
+            }
+            done(std::move(tracks));
+          }
+      );
+      return;
+    }
+    ytPages(server, browseId, {}, true, 0, std::make_shared<std::vector<Track>>(), {}, std::move(done));
+  }
+
+  void RemoteSources::ytPages(
+      const Server& server, std::string browseId, std::string token, bool inBody, int page,
+      std::shared_ptr<std::vector<Track>> out, YtHeader header, SearchFn done
+  ) {
+    constexpr int kMaxPages = 10;
+    nlohmann::json body = nlohmann::json::object();
+    std::string extra;
+    if (token.empty()) {
+      body["browseId"] = browseId;
+    } else if (inBody) {
+      body["continuation"] = token;
+    } else {
+      extra = std::format("&ctoken={0}&continuation={0}&type=next", token);
+    }
+    ytRequest(server, "browse", extra, std::move(body), [this, server, browseId, page, out, header, done = std::move(done)](bool ok, nlohmann::json response) mutable {
+      if (!ok) {
+        done(std::move(*out));
+        return;
+      }
+      const bool album = browseId.starts_with("MPREb");
+      if (album && page == 0) {
+        header = parseYtHeader(response);
+      }
+      for (YtTrack& yt : parseYtTracks(response)) {
+        if (album) {
+          yt.album = header.title.empty() ? yt.album : header.title;
+          yt.albumId = browseId;
+          if (!yt.artistLinked && !header.artist.empty()) {
+            yt.artist = header.artist;
+          }
+          if (yt.thumbnail.empty()) {
+            yt.thumbnail = header.thumbnail;
+          }
+        }
+        out->push_back(ytTrack(server, yt));
+      }
+      const YtContinuation next = parseYtContinuation(response);
+      if (!next.token.empty() && page + 1 < kMaxPages) {
+        ytPages(server, browseId, next.token, next.inBody, page + 1, std::move(out), std::move(header), std::move(done));
+      } else {
+        done(std::move(*out));
+      }
+    });
+  }
+
+  void RemoteSources::youTubeRadio(const Server& server, const std::string& videoId, SearchFn done) {
+    ytRequest(
+        server, "next", "", {{"videoId", videoId}, {"playlistId", "RDAMVM" + videoId}, {"isAudioOnly", true}},
+        [this, server, done = std::move(done)](bool ok, nlohmann::json response) {
+          std::vector<Track> tracks;
+          for (const YtTrack& yt : ok ? parseYtPanel(response) : std::vector<YtTrack>{}) {
+            tracks.push_back(ytTrack(server, yt));
+          }
+          done(std::move(tracks));
+        }
+    );
+  }
+
   void RemoteSources::searchYouTube(const Server& server, const std::string& query, SearchFn done) {
     ytRequest(
         server, "search", "", {{"query", query}, {"params", kYtSongsOnly}},

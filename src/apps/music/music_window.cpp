@@ -1,5 +1,7 @@
 #include "apps/music/music_window.h"
 
+#include "apps/music/recommendations.h"
+
 #include "apps/common/okaru_app.h"
 #include "apps/common/portal_file_chooser.h"
 #include "render/core/image_file_loader.h"
@@ -821,7 +823,26 @@ namespace okaru::music {
     m_remote->setServers(m_state.servers);
     m_player.setYtdlCookies(m_remote->ytdlCookies());
     YouTubeLogin::cleanLeftovers();
+    // YouTube Music: la URL directa si ya se resolvió por adelantado; si no, yt-dlp dentro de mpv (más lento).
+    m_streams = std::make_unique<StreamResolver>([this](const std::string& videoId) {
+      const auto& queue = m_player.state().queue;
+      for (std::size_t i = 0; i < queue.size(); ++i) {
+        RemoteRef ref;
+        if (static_cast<std::int64_t>(i) != m_player.state().current && queue[i].starts_with("yt://")
+            && parseRemote(queue[i], ref) && ref.item == videoId) {
+          m_player.refreshItem(i);
+        }
+      }
+    });
+    m_streams->setCookies(m_remote->ytdlCookies());
+    m_player.setOnStreamFailed([this](const std::string& url) { m_streams->forget(url); });
     m_player.setResolver([this](const std::string& path) {
+      RemoteRef ref;
+      if (path.starts_with("yt://") && parseRemote(path, ref)) {
+        if (std::string url = m_streams->cached(ref.item); !url.empty()) {
+          return url;
+        }
+      }
       return isRemote(path) ? m_remote->streamUrl(path) : std::string();
     });
     m_player.setVolume(m_state.volume);
@@ -1289,6 +1310,9 @@ namespace okaru::music {
     if (m_mpris != nullptr) {
       m_mpris->update();
     }
+    if (structural) {
+      prefetchUpcoming();
+    }
     // El reproductor completo se rehace si cambió la cola o la canción (carátula, letra); el resto solo actualiza
     // la barra de abajo.
     const bool queueChanged = m_playerTab == PlayerTab::Queue
@@ -1558,7 +1582,8 @@ namespace okaru::music {
       const char* glyph;
       const char* key;
     };
-    constexpr std::array<Entry, 4> kEntries{{
+    constexpr std::array<Entry, 5> kEntries{{
+        {View::ForYou, "sparkles", "apps.music.for-you.title"},
         {View::Albums, "disc", "apps.music.albums"},
         {View::Artists, "users", "apps.music.artists"},
         {View::Songs, "music", "apps.music.songs"},
@@ -1824,6 +1849,7 @@ namespace okaru::music {
         return {"apps.music.sort.name", "apps.music.sort.songs"};
       case View::Settings:
       case View::Playlist:
+      case View::ForYou:
         break;
       }
       return {};
@@ -1854,6 +1880,7 @@ namespace okaru::music {
         break;
       case View::Settings:
       case View::Playlist:
+      case View::ForYou:
         break;
       }
       it = m_sorted.emplace(key, std::move(order)).first;
@@ -1950,6 +1977,9 @@ namespace okaru::music {
     }
     if (m_view == View::Settings) {
       return buildSettings(width, height, scale);
+    }
+    if (m_view == View::ForYou) {
+      return buildForYou(width, height, scale);
     }
     if (m_model.tracks.empty()) {
       return buildEmpty(width, height, scale);
@@ -2076,6 +2106,7 @@ namespace okaru::music {
       break;
     }
     case View::Settings:
+    case View::ForYou:
       break;
     case View::Playlist: {
       const Playlist* list = m_playlists.find(m_playlistId);
@@ -3155,6 +3186,301 @@ namespace okaru::music {
     });
   }
 
+  // ── Recomendaciones («Para ti») ─────────────────────────────────────────────────────────────────
+
+  const Server* MusicWindow::youTubeServer() const {
+    const auto it = std::ranges::find(m_state.servers, ServerKind::YouTube, &Server::kind);
+    return it != m_state.servers.end() ? &*it : nullptr;
+  }
+
+  void MusicWindow::prefetchUpcoming() {
+    const auto& state = m_player.state();
+    const std::size_t count = state.queue.size();
+    if (m_streams == nullptr || state.current < 0 || count == 0) {
+      return;
+    }
+    // Las tres siguientes (con «repetir todo», dando la vuelta).
+    std::vector<std::string> ids;
+    for (std::size_t k = 1; k <= 3; ++k) {
+      std::size_t i = static_cast<std::size_t>(state.current) + k;
+      if (i >= count) {
+        if (m_player.repeat() != Repeat::All) {
+          break;
+        }
+        i %= count;
+      }
+      RemoteRef ref;
+      if (state.queue[i].starts_with("yt://") && parseRemote(state.queue[i], ref)) {
+        ids.push_back(ref.item);
+      }
+    }
+    if (!ids.empty()) {
+      m_streams->prefetch(ids);
+    }
+  }
+
+  void MusicWindow::playExtra(std::vector<Track> tracks, std::size_t start) {
+    std::vector<std::string> paths;
+    paths.reserve(tracks.size());
+    for (Track& track : tracks) {
+      paths.push_back(track.path);
+      if (!m_allByPath.contains(track.path)) {
+        m_extraTracks.insert_or_assign(track.path, std::move(track));
+      }
+    }
+    if (!paths.empty()) {
+      m_player.playQueue(paths, std::min(start, paths.size() - 1));
+    }
+  }
+
+  void MusicWindow::startRadio(const std::string& path) {
+    const Server* found = youTubeServer();
+    if (found == nullptr) {
+      return;
+    }
+    const Server server = *found;
+    RemoteRef ref;
+    if (path.starts_with("yt://") && parseRemote(path, ref)) {
+      m_remote->youTubeRadio(server, ref.item, [this](std::vector<Track> tracks) { playExtra(std::move(tracks), 0); });
+      return;
+    }
+    // Una canción propia: se busca en YouTube Music y la radio sigue después de ella (que suena desde aquí).
+    const Track* track = trackForItem(path);
+    if (track == nullptr) {
+      return;
+    }
+    m_remote->searchYouTube(server, track->title + " " + track->artist, [this, server, path](std::vector<Track> results) {
+      RemoteRef first;
+      if (results.empty() || !parseRemote(results.front().path, first)) {
+        return;
+      }
+      m_remote->youTubeRadio(server, first.item, [this, path](std::vector<Track> tracks) {
+        if (!tracks.empty()) {
+          tracks.erase(tracks.begin()); // la versión de YouTube de la misma canción
+        }
+        std::vector<std::string> paths{path};
+        for (Track& t : tracks) {
+          paths.push_back(t.path);
+          if (!m_allByPath.contains(t.path)) {
+            m_extraTracks.insert_or_assign(t.path, std::move(t));
+          }
+        }
+        m_player.playQueue(paths, 0);
+      });
+    });
+  }
+
+  void MusicWindow::loadHome(bool force) {
+    const Server* server = youTubeServer();
+    if (server == nullptr || m_homeLoading || (m_homeLoaded && !force)) {
+      return;
+    }
+    m_homeLoading = true;
+    m_remote->youTubeHome(*server, [this](bool ok, std::vector<YtShelf> shelves) {
+      m_homeLoading = false;
+      m_homeLoaded = true;
+      if (ok) {
+        m_home = std::move(shelves);
+      }
+      if (m_view == View::ForYou) {
+        m_app.requestRebuild();
+      }
+    });
+    m_app.requestRebuild();
+  }
+
+  void MusicWindow::playCard(const YtCard& card, const std::string& key) {
+    const Server* server = youTubeServer();
+    if (server == nullptr || !m_cardLoading.empty()) {
+      return;
+    }
+    m_cardLoading = key;
+    m_app.requestRebuild();
+    auto done = [this](std::vector<Track> tracks) {
+      m_cardLoading.clear();
+      playExtra(std::move(tracks), 0);
+      m_app.requestRebuild();
+    };
+    // Una canción empieza su radio, como en YouTube Music; un álbum o una lista, sus canciones.
+    if (card.kind == YtCard::Kind::Song) {
+      m_remote->youTubeRadio(*server, card.videoId, std::move(done));
+    } else {
+      m_remote->youTubeTracks(*server, card.browseId, std::move(done));
+    }
+  }
+
+  std::string MusicWindow::cardCover(const std::string& url) {
+    if (url.empty()) {
+      return {};
+    }
+    if (const auto it = m_cardCovers.find(url); it != m_cardCovers.end()) {
+      return it->second;
+    }
+    const std::string big = ytCoverSize(url, 320);
+    gchar* sum = g_compute_checksum_for_string(G_CHECKSUM_MD5, big.c_str(), static_cast<gssize>(big.size()));
+    const fs::path target = m_library.coversDir() / (std::string("card-") + sum + ".jpg");
+    g_free(sum);
+    std::error_code ec;
+    if (fs::exists(target, ec)) {
+      return m_cardCovers[url] = target.string();
+    }
+    if (m_cardCoversPending.insert(url).second) {
+      m_online.downloadCover(big, target, [this, url, target](bool ok) {
+        m_cardCoversPending.erase(url);
+        if (ok) {
+          m_cardCovers[url] = target.string();
+          // Llegan muchas seguidas: se muestran en tandas, a lo sumo una reconstrucción cada 400 ms.
+          if (!m_coverRebuild.active()) m_coverRebuild.start(std::chrono::milliseconds(400), [this] {
+            if (!m_fullPlayer) { // el mismo temporizador que las carátulas de la biblioteca
+              m_app.requestRebuild();
+            }
+          });
+        }
+      });
+    }
+    return {};
+  }
+
+  std::unique_ptr<Node> MusicWindow::buildForYou(float width, float height, float scale) {
+    const float pad = Style::spaceLg * scale;
+    const float inner = std::max(0.0F, width - pad * 2.0F - 16.0F * scale);
+    const float cardW = 156.0F * scale;
+    const float gap = Style::spaceMd * scale;
+    const auto perRow = std::max<std::size_t>(1, static_cast<std::size_t>((inner + gap) / (cardW + gap)));
+    auto page = ui::column({.align = FlexAlign::Start, .gap = Style::spaceLg * scale, .padding = pad, .width = inner + pad * 2.0F});
+
+    const Server* youtube = youTubeServer();
+    auto header = ui::row({.align = FlexAlign::Center, .gap = Style::spaceSm * scale, .width = inner});
+    header->addChild(ui::label({.text = tr("apps.music.for-you.title"), .fontSize = Style::fontSizeHeader * scale, .fontWeight = FontWeight::SemiBold, .flexGrow = 1.0F}));
+    if (youtube != nullptr) {
+      header->addChild(ui::button({
+          .glyph = "refresh",
+          .enabled = !m_homeLoading,
+          .variant = ButtonVariant::Ghost,
+          .tooltip = tr("apps.music.for-you.refresh"),
+          .onClick = [this] { loadHome(true); },
+      }));
+    }
+    page->addChild(std::move(header));
+
+    struct CardData {
+      std::string cover;
+      std::string title;
+      std::string subtitle;
+      std::string key;
+      std::function<void()> click;
+    };
+    const auto card = [&](const CardData& data) {
+      auto box = ui::column({.align = FlexAlign::Start, .gap = 4.0F * scale, .width = cardW});
+      auto frame = ui::node({.width = cardW, .height = cardW});
+      auto cover = std::make_unique<CoverImage>();
+      cover->setSize(cardW, cardW);
+      cover->setCover(data.cover);
+      frame->addChild(std::move(cover));
+      if (!data.key.empty() && data.key == m_cardLoading) {
+        // Abriéndose: velo y ruedita sobre la carátula.
+        frame->addChild(ui::box({.fill = colorSpecFromRole(ColorRole::Surface, 0.6F), .width = cardW, .height = cardW}));
+        auto spin = ui::row({.align = FlexAlign::Center, .justify = FlexJustify::Center, .width = cardW, .height = cardW});
+        spin->addChild(ui::spinner({}));
+        frame->addChild(std::move(spin));
+      }
+      box->addChild(std::move(frame));
+      box->addChild(ui::label({.text = data.title, .fontSize = Style::fontSizeBody * scale, .fontWeight = FontWeight::SemiBold, .maxWidth = cardW, .maxLines = 1}));
+      box->addChild(ui::label({.text = data.subtitle, .fontSize = Style::fontSizeCaption * scale, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant), .maxWidth = cardW, .maxLines = 1}));
+      auto area = ui::inputArea({
+          .tooltip = data.title,
+          .onClick = [click = data.click](const InputArea::PointerData&) { click(); },
+      });
+      Node* content = area->addChild(std::move(box));
+      if (Renderer* renderer = m_app.renderer(); renderer != nullptr) {
+        content->layout(*renderer);
+        area->setSize(content->width(), content->height());
+      }
+      return area;
+    };
+    const auto shelf = [&](const std::string& title, const std::vector<CardData>& cards) {
+      if (cards.empty()) {
+        return;
+      }
+      const bool expanded = m_homeExpanded.contains(title);
+      auto column = ui::column({.align = FlexAlign::Start, .gap = Style::spaceSm * scale, .width = inner});
+      auto head = ui::row({.align = FlexAlign::Center, .width = inner});
+      head->addChild(ui::label({.text = title, .fontSize = Style::fontSizeTitle * scale, .fontWeight = FontWeight::SemiBold, .flexGrow = 1.0F}));
+      if (cards.size() > perRow) {
+        head->addChild(ui::button({
+            .text = expanded ? tr("apps.music.for-you.less") : tr("apps.music.for-you.all"),
+            .variant = ButtonVariant::Ghost,
+            .onClick =
+                [this, title] {
+                  if (!m_homeExpanded.erase(title)) {
+                    m_homeExpanded.insert(title);
+                  }
+                  m_app.requestRebuild();
+                },
+        }));
+      }
+      column->addChild(std::move(head));
+      const std::size_t shown = expanded ? cards.size() : std::min(cards.size(), perRow);
+      for (std::size_t first = 0; first < shown; first += perRow) {
+        auto row = ui::row({.align = FlexAlign::Start, .gap = gap});
+        for (std::size_t i = first; i < std::min(shown, first + perRow); ++i) {
+          row->addChild(card(cards[i]));
+        }
+        column->addChild(std::move(row));
+      }
+      page->addChild(std::move(column));
+    };
+    const auto note = [&](const std::string& text) {
+      page->addChild(ui::label({.text = text, .color = colorSpecFromRole(ColorRole::OnSurfaceVariant), .maxWidth = inner}));
+    };
+
+    // YouTube Music: los estantes de su portada.
+    if (youtube != nullptr) {
+      if (!m_homeLoaded) {
+        loadHome(false);
+        page->addChild(ui::row({.align = FlexAlign::Center, .gap = Style::spaceSm * scale}, ui::spinner({}),
+                               ui::label({.text = tr("apps.music.for-you.loading"), .color = colorSpecFromRole(ColorRole::OnSurfaceVariant)})));
+      } else if (m_home.empty()) {
+        note(tr("apps.music.for-you.unavailable"));
+      }
+      for (const YtShelf& yt : m_home) {
+        std::vector<CardData> cards;
+        for (const YtCard& c : yt.cards) {
+          const std::string key = yt.title + "/" + c.videoId + c.browseId;
+          cards.push_back({cardCover(c.thumbnail), c.title, c.subtitle, key, [this, c, key] { playCard(c, key); }});
+        }
+        shelf(yt.title, cards);
+      }
+    } else {
+      note(tr("apps.music.for-you.connect"));
+    }
+
+    // De la biblioteca: lo último que llegó y álbumes para volver a escuchar (los mismos todo el día).
+    const auto albums = [&](const std::vector<std::size_t>& indices) {
+      std::vector<CardData> cards;
+      for (std::size_t a : indices) {
+        const Album& album = m_model.albums[a];
+        cards.push_back({album.cover, album.title.empty() ? tr("apps.music.unknown-album") : album.title, albumArtistName(album), {}, [this, a] {
+                           m_view = View::Albums;
+                           open({.kind = Detail::Kind::Album, .index = a});
+                         }});
+      }
+      return cards;
+    };
+    shelf(tr("apps.music.for-you.recent"), albums(recentAlbums(m_model, 24)));
+    const auto day = static_cast<std::uint32_t>(std::time(nullptr) / 86400);
+    shelf(tr("apps.music.for-you.rediscover"), albums(rediscoverAlbums(m_model, 24, day)));
+
+    auto scroll = ui::scrollView({
+        .state = &m_scroll[scrollKey(View::ForYou, 0, 0, false)],
+        .contentScale = scale,
+        .width = width,
+        .height = height,
+    });
+    scroll->content()->addChild(std::move(page));
+    return scroll;
+  }
+
   // ── Servidores ────────────────────────────────────────────────────────────────────────────────────
 
   void MusicWindow::syncServers() {
@@ -3194,6 +3520,9 @@ namespace okaru::music {
     m_library.replaceRemote(remotePrefix(*it), {});
     m_remote->forget(id);
     m_player.setYtdlCookies(m_remote->ytdlCookies());
+    m_streams->setCookies(m_remote->ytdlCookies());
+    m_home.clear();
+    m_homeLoaded = false;
     m_state.servers.erase(it);
     m_serverStatus.erase(id);
     saveState();
@@ -3732,6 +4061,9 @@ namespace okaru::music {
     std::vector<MenuEntry> menu;
     menu.push_back({tr("apps.music.menu.play-next"), [this, paths] { m_player.playNext(paths); }});
     menu.push_back({tr("apps.music.menu.add-to-queue"), [this, paths] { m_player.append(paths); }});
+    if (youTubeServer() != nullptr && paths.size() == 1) {
+      menu.push_back({tr("apps.music.menu.radio"), [this, path = paths.front()] { startRadio(path); }});
+    }
     const bool liked = m_playlists.liked(paths.front());
     menu.push_back({liked ? tr("apps.music.menu.unlike") : tr("apps.music.like"), [this, path = paths.front()] { toggleLike(path); }});
     if (const auto it = m_byPath.find(paths.front()); it != m_byPath.end()) {
@@ -4089,6 +4421,8 @@ namespace okaru::music {
       const Server server = *existing;
       m_remote->setYouTubeSession(server, cookies);
       m_player.setYtdlCookies(m_remote->ytdlCookies());
+      m_streams->setCookies(m_remote->ytdlCookies());
+      m_homeLoaded = false; // otra sesión: otra portada
       m_serverStatus.erase(server.id);
       saveState();
       m_ytForm = {};
@@ -4181,6 +4515,9 @@ namespace okaru::music {
       return true;
     case XKB_KEY_Right:
       m_player.seekBy(5.0);
+      return true;
+    case XKB_KEY_h: // «inicio»: Para ti
+      show(View::ForYou);
       return true;
     case XKB_KEY_n:
       m_player.next();

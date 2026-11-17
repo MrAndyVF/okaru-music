@@ -171,7 +171,8 @@
         "new-playlist": "Nueva lista con esta canción…",
         "remove-from-playlist": "Quitar de esta lista",
         "add-to-playlist": "Agregar a una lista",
-        "remove-from-queue": "Quitar de la cola"
+        "remove-from-queue": "Quitar de la cola",
+        "radio": "Iniciar radio"
       },
       "servers": {
         "title": "Servidores",
@@ -221,6 +222,17 @@
         "relogin": "Volver a iniciar sesión",
         "results": "En YouTube Music",
         "searching": "Buscando…"
+      },
+      "for-you": {
+        "title": "Para ti",
+        "refresh": "Actualizar recomendaciones",
+        "all": "Ver todo",
+        "less": "Ver menos",
+        "loading": "Cargando tus recomendaciones de YouTube Music…",
+        "unavailable": "No se pudieron cargar las recomendaciones de YouTube Music. Revisa la conexión o vuelve a iniciar sesión en Ajustes.",
+        "connect": "Conecta YouTube Music en Ajustes para recibir recomendaciones y mixes hechos para ti.",
+        "recent": "Agregados recientemente",
+        "rediscover": "Redescubre"
       }
     }
   }
