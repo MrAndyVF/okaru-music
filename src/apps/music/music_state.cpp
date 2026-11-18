@@ -1,8 +1,10 @@
 #include "apps/music/music_state.h"
 
+#include "core/log.h"
 #include "util/file_utils.h"
 
 #include <algorithm>
+#include <ctime>
 #include <fstream>
 #include <glib.h>
 #include <toml++/toml.hpp>
@@ -12,6 +14,8 @@ namespace okaru::music {
   namespace fs = std::filesystem;
 
   namespace {
+
+    constexpr Logger kLog("music");
 
     void readSources(const toml::table* table, SourceOrder& sources) {
       if (table == nullptr) {
@@ -66,7 +70,15 @@ namespace okaru::music {
     toml::table root;
     try {
       root = toml::parse_file(path.string());
-    } catch (const toml::parse_error&) {
+    } catch (const toml::parse_error& error) {
+      // Dañado (no ausente): se aparta, o el guardado al cerrar lo pisaría con los valores de fábrica y se
+      // perderían los servidores, la cola y los ajustes.
+      if (std::error_code ec; fs::exists(path, ec)) {
+        fs::path aside = path;
+        aside += ".danado-" + std::to_string(std::time(nullptr));
+        fs::rename(path, aside, ec);
+        kLog.warn("cannot read {} ({}); moved aside as {}", path.string(), error.description(), aside.string());
+      }
       const char* music = g_get_user_special_dir(G_USER_DIRECTORY_MUSIC);
       const char* home = g_get_home_dir();
       state.folders.emplace_back(music != nullptr ? fs::path(music) : fs::path(home) / "Music");

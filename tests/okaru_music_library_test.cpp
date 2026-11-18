@@ -195,6 +195,18 @@ namespace {
     // Un orden inválido (repetido) se ignora y queda el de fábrica.
     std::ofstream(path) << "[settings.lyrics]\norder = [0, 0, 1]\n";
     assert(loadState(path).settings.lyrics.order[2] == Source::Online);
+    // Un archivo dañado no se pierde: se aparta antes de que el guardado al cerrar lo pise.
+    std::ofstream(path) << "extras = []\n[[extras]]\npath = 'x'\n";
+    (void)loadState(path);
+    assert(!fs::exists(path));
+    bool aside = false;
+    for (const auto& entry : fs::directory_iterator(path.parent_path())) {
+      if (entry.path().filename().string().starts_with(path.filename().string() + ".danado-")) {
+        aside = true;
+        fs::remove(entry.path());
+      }
+    }
+    assert(aside);
     fs::remove(path);
   }
 
