@@ -120,7 +120,9 @@ namespace okaru::music {
     [[nodiscard]] const Server* sourceServer() const;
     // Búsqueda en el catálogo de YouTube Music (con el origen en YouTube Music).
     void searchYouTube();
-    [[nodiscard]] std::unique_ptr<Node> buildItemTracks(std::vector<std::string> items, float scale);
+    [[nodiscard]] std::unique_ptr<Node> buildItemTracks(
+        std::vector<std::string> items, float scale, std::int64_t playlist = 0, std::vector<std::size_t> positions = {}
+    );
     // Carátula de una canción que suena y no está en la biblioteca (resultado de YouTube Music).
     void fetchExtraCover(const std::string& item);
     // Recomendaciones («Para ti»): portada de YouTube Music y estantes de la biblioteca.
@@ -140,7 +142,7 @@ namespace okaru::music {
     [[nodiscard]] std::unique_ptr<Node> buildTracks(std::vector<std::size_t> tracks, bool numbers, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildAlbums(std::vector<std::size_t> albums, float scale);
     [[nodiscard]] std::unique_ptr<Node> buildDetailHeader(
-        const std::string& cover, std::string title, std::string subtitle, std::vector<std::size_t> tracks, float width,
+        const std::string& cover, std::string title, std::string subtitle, std::vector<std::string> items, float width,
         float scale, std::unique_ptr<Node> extra = nullptr
     );
     // Selector de orden y botón para invertirlo de la vista actual (Álbumes, Artistas, Canciones, Géneros).
@@ -187,8 +189,8 @@ namespace okaru::music {
     void settleFullPlayer(AnimationManager& anim, bool visible, std::function<void()> done);
     void open(Detail detail);
     void back();
-    void playTracks(const std::vector<std::size_t>& tracks, std::size_t start, bool shuffle);
-    void queueTracks(const std::vector<std::size_t>& tracks);
+    [[nodiscard]] std::vector<std::string> pathsOf(const std::vector<std::size_t>& tracks) const;
+    void playItems(const std::vector<std::string>& items, std::size_t start, bool shuffle);
     void onPlayerChange(bool structural);
     void refreshNowPlaying();
     [[nodiscard]] const Track* trackForItem(const std::string& item) const;

@@ -1108,11 +1108,18 @@ namespace okaru::music {
     m_state.queue = state.queue;
     m_state.current = state.current > 0 ? static_cast<std::size_t>(state.current) : 0;
     m_state.extras.clear();
-    for (const auto& item : state.queue) {
-      if (const auto it = m_extraTracks.find(item); it != m_extraTracks.end() && !m_allByPath.contains(item)) {
+    // Las de fuera de la biblioteca que están en la cola o en alguna lista: sin esto, al reabrir no se sabría su nombre.
+    std::unordered_set<std::string> saved;
+    const auto keep = [&](const std::string& item) {
+      if (const auto it = m_extraTracks.find(item);
+          it != m_extraTracks.end() && !m_allByPath.contains(item) && saved.insert(item).second) {
         const Track& t = it->second;
         m_state.extras.push_back({t.path, t.title, t.artist, t.album, t.cover, t.duration});
       }
+    };
+    std::ranges::for_each(state.queue, keep);
+    for (const Playlist& list : m_playlists.all()) {
+      std::ranges::for_each(list.items, keep);
     }
     if (!music::saveState(m_state, statePath())) {
       kLog.warn("cannot save {}", statePath().string());
@@ -1329,29 +1336,24 @@ namespace okaru::music {
     m_app.requestRebuild();
   }
 
-  void MusicWindow::playTracks(const std::vector<std::size_t>& tracks, std::size_t start, bool shuffle) {
-    if (tracks.empty()) {
-      return;
-    }
+  std::vector<std::string> MusicWindow::pathsOf(const std::vector<std::size_t>& tracks) const {
     std::vector<std::string> items;
     items.reserve(tracks.size());
     for (std::size_t i : tracks) {
       items.push_back(m_model.tracks[i].path);
+    }
+    return items;
+  }
+
+  void MusicWindow::playItems(const std::vector<std::string>& items, std::size_t start, bool shuffle) {
+    if (items.empty()) {
+      return;
     }
     if (shuffle) {
       m_player.setShuffle(true);
       start = static_cast<std::size_t>(std::rand()) % items.size();
     }
     m_player.playQueue(items, start);
-  }
-
-  void MusicWindow::queueTracks(const std::vector<std::size_t>& tracks) {
-    std::vector<std::string> items;
-    items.reserve(tracks.size());
-    for (std::size_t i : tracks) {
-      items.push_back(m_model.tracks[i].path);
-    }
-    m_player.append(items);
   }
 
   const Track* MusicWindow::trackForItem(const std::string& item) const {
@@ -1754,12 +1756,22 @@ namespace okaru::music {
     return empty;
   }
 
-  std::unique_ptr<Node> MusicWindow::buildItemTracks(std::vector<std::string> items, float scale) {
+  std::unique_ptr<Node> MusicWindow::buildItemTracks(
+      std::vector<std::string> items, float scale, std::int64_t playlist, std::vector<std::size_t> positions
+  ) {
     std::vector<TrackRowData> rows;
     rows.reserve(items.size());
+    // En una lista con «Todos», cada canción dice de qué origen es.
+    const bool badges = playlist != 0 && m_state.source.empty() && !m_state.servers.empty();
     for (std::size_t i = 0; i < items.size(); ++i) {
-      rows.push_back({.track = trackForItem(items[i]), .item = items[i], .number = static_cast<int>(i + 1)});
+      rows.push_back({
+          .track = trackForItem(items[i]),
+          .item = items[i],
+          .number = static_cast<int>(i + 1),
+          .origin = badges ? originName(originOf(items[i])) : std::string(),
+      });
     }
+    auto where = std::make_shared<std::vector<std::size_t>>(std::move(positions));
     auto list = std::make_shared<std::vector<std::string>>(std::move(items));
     m_trackAdapter = std::make_unique<TrackListAdapter>(
         std::move(rows), scale,
@@ -1768,12 +1780,17 @@ namespace okaru::music {
             .activate = [this, list](std::size_t index) { m_player.playQueue(*list, index); },
             .isLiked = [this, list](std::size_t index) { return m_playlists.liked((*list)[index]); },
             .toggleLike = [this, list](std::size_t index) { toggleLike((*list)[index]); },
-            .menu = [this, list](std::size_t index, float x, float y) { openSongMenu({(*list)[index]}, x, y); },
+            .menu =
+                [this, list, playlist, where](std::size_t index, float x, float y) {
+                  // Quitar de la lista usa la posición real en la lista, no la de la vista filtrada.
+                  openSongMenu({(*list)[index]}, x, y, playlist, playlist != 0 ? (*where)[index] : index);
+                },
         }
     );
     return ui::virtualListView({
         .out = &m_trackList,
-        .state = &m_scroll[scrollKey(m_view, 0, 0, true)],
+        .state = &m_scroll[playlist != 0 ? scrollKey(m_view, static_cast<int>(m_detail.kind), m_detail.index, false)
+                                           : scrollKey(m_view, 0, 0, true)],
         .contentScale = scale,
         .adapter = m_trackAdapter.get(),
         .flexGrow = 1.0F,
@@ -1783,29 +1800,21 @@ namespace okaru::music {
   std::unique_ptr<Node> MusicWindow::buildTracks(std::vector<std::size_t> tracks, bool numbers, float scale) {
     std::vector<TrackRowData> rows;
     rows.reserve(tracks.size());
-    // En una lista con «Todos», cada canción dice de qué origen es.
-    const bool badges = m_view == View::Playlist && m_query.empty() && m_state.source.empty() && !m_state.servers.empty();
     for (std::size_t i = 0; i < tracks.size(); ++i) {
       const Track& track = m_model.tracks[tracks[i]];
-      rows.push_back({
-          .track = &track,
-          .item = track.path,
-          .number = numbers ? track.number : static_cast<int>(i + 1),
-          .origin = badges ? originName(originOf(track.path)) : std::string(),
-      });
+      rows.push_back({.track = &track, .item = track.path, .number = numbers ? track.number : static_cast<int>(i + 1)});
     }
     auto items = std::make_shared<std::vector<std::size_t>>(std::move(tracks));
-    const std::int64_t playlist = m_view == View::Playlist && m_query.empty() ? m_playlistId : 0;
     m_trackAdapter = std::make_unique<TrackListAdapter>(
         std::move(rows), scale,
         TrackListCallbacks{
             .isCurrent = [this, items](std::size_t index) { return m_model.tracks[(*items)[index]].path == m_player.currentItem(); },
-            .activate = [this, items](std::size_t index) { playTracks(*items, index, false); },
+            .activate = [this, items](std::size_t index) { playItems(pathsOf(*items), index, false); },
             .isLiked = [this, items](std::size_t index) { return m_playlists.liked(m_model.tracks[(*items)[index]].path); },
             .toggleLike = [this, items](std::size_t index) { toggleLike(m_model.tracks[(*items)[index]].path); },
             .menu =
-                [this, items, playlist](std::size_t index, float x, float y) {
-                  openSongMenu({m_model.tracks[(*items)[index]].path}, x, y, playlist, index);
+                [this, items](std::size_t index, float x, float y) {
+                  openSongMenu({m_model.tracks[(*items)[index]].path}, x, y);
                 },
         }
     );
@@ -1836,7 +1845,7 @@ namespace okaru::music {
   }
 
   std::unique_ptr<Node> MusicWindow::buildDetailHeader(
-      const std::string& cover, std::string title, std::string subtitle, std::vector<std::size_t> tracks, float width,
+      const std::string& cover, std::string title, std::string subtitle, std::vector<std::string> items, float width,
       float scale, std::unique_ptr<Node> extra
   ) {
     auto header = ui::row({.align = FlexAlign::Center, .gap = Style::spaceLg * scale, .width = width});
@@ -1872,7 +1881,7 @@ namespace okaru::music {
             .maxLines = 1,
         })
     );
-    auto shared = std::make_shared<std::vector<std::size_t>>(std::move(tracks));
+    auto shared = std::make_shared<std::vector<std::string>>(std::move(items));
     auto buttons = ui::row({.align = FlexAlign::Center, .gap = Style::spaceXs * scale});
     buttons->addChild(
         ui::button({
@@ -1881,7 +1890,7 @@ namespace okaru::music {
             .variant = ButtonVariant::Primary,
             .onClick = [this, shared] {
               m_player.setShuffle(false);
-              playTracks(*shared, 0, false);
+              playItems(*shared, 0, false);
             },
         })
     );
@@ -1890,7 +1899,7 @@ namespace okaru::music {
             .text = tr("apps.music.shuffle"),
             .glyph = "arrows-shuffle",
             .variant = ButtonVariant::Outline,
-            .onClick = [this, shared] { playTracks(*shared, 0, true); },
+            .onClick = [this, shared] { playItems(*shared, 0, true); },
         })
     );
     buttons->addChild(
@@ -1898,7 +1907,7 @@ namespace okaru::music {
             .glyph = "playlist-add",
             .variant = ButtonVariant::Ghost,
             .tooltip = tr("apps.music.add-to-queue"),
-            .onClick = [this, shared] { queueTracks(*shared); },
+            .onClick = [this, shared] { m_player.append(*shared); },
         })
     );
     if (extra != nullptr) {
@@ -2069,7 +2078,7 @@ namespace okaru::music {
               {albumArtistName(album), album.year > 0 ? std::to_string(album.year) : "",
                trp("apps.music.song-count", static_cast<long>(album.tracks.size())), totalDuration(album.duration)}
           ),
-          album.tracks, inner, scale
+          pathsOf(album.tracks), inner, scale
       ));
       content->addChild(buildTracks(album.tracks, true, scale));
       return content;
@@ -2092,7 +2101,7 @@ namespace okaru::music {
               {trp("apps.music.album-count", static_cast<long>(artist.albums.size())),
                trp("apps.music.song-count", static_cast<long>(artist.trackCount))}
           ),
-          std::move(tracks), inner, scale
+          pathsOf(tracks), inner, scale
       ));
       content->addChild(buildAlbums(artist.albums, scale));
       return content;
@@ -2100,7 +2109,7 @@ namespace okaru::music {
     case Detail::Kind::Genre: {
       const Genre& genre = m_model.genres[m_detail.index];
       content->addChild(buildDetailHeader(
-          "", genre.name, trp("apps.music.song-count", static_cast<long>(genre.tracks.size())), genre.tracks, inner, scale
+          "", genre.name, trp("apps.music.song-count", static_cast<long>(genre.tracks.size())), pathsOf(genre.tracks), inner, scale
       ));
       content->addChild(buildTracks(genre.tracks, false, scale));
       return content;
@@ -2188,13 +2197,20 @@ namespace okaru::music {
       if (list == nullptr) {
         break;
       }
-      // Solo las que siguen en la biblioteca, en el orden de la lista.
-      std::vector<std::size_t> tracks;
+      // En el orden de la lista: las que siguen en la biblioteca (del origen elegido) y las de fuera de ella
+      // (YouTube) que se conocen; las borradas de la biblioteca no se muestran.
+      std::vector<std::string> tracks;
+      std::vector<std::size_t> positions;
       double duration = 0.0;
-      for (const auto& path : list->items) {
-        if (const auto it = m_byPath.find(path); it != m_byPath.end()) {
-          tracks.push_back(it->second);
-          duration += m_model.tracks[it->second].duration;
+      for (std::size_t i = 0; i < list->items.size(); ++i) {
+        const std::string& path = list->items[i];
+        const bool visible = m_byPath.contains(path)
+            || (!m_allByPath.contains(path) && m_extraTracks.contains(path)
+                && (m_state.source.empty() || originOf(path) == m_state.source));
+        if (visible) {
+          tracks.push_back(path);
+          positions.push_back(i);
+          duration += trackForItem(path)->duration;
         }
       }
       std::unique_ptr<Node> extra;
@@ -2219,7 +2235,7 @@ namespace okaru::music {
         }));
       }
       content->addChild(buildDetailHeader(
-          tracks.empty() ? "" : m_model.tracks[tracks.front()].cover, playlistName(*list),
+          tracks.empty() ? "" : trackForItem(tracks.front())->cover, playlistName(*list),
           joinDot({trp("apps.music.song-count", static_cast<long>(tracks.size())), tracks.empty() ? "" : totalDuration(duration)}),
           tracks, inner, scale, std::move(extra)
       ));
@@ -2230,7 +2246,7 @@ namespace okaru::music {
             .maxWidth = inner,
         }));
       } else {
-        content->addChild(buildTracks(std::move(tracks), false, scale));
+        content->addChild(buildItemTracks(std::move(tracks), scale, list->id, std::move(positions)));
       }
       break;
     }
