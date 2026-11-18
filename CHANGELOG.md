@@ -2,6 +2,29 @@
 
 Each version has an English and a Spanish section. / Cada versión tiene una sección en inglés y otra en español.
 
+## [1.1.1] - 2026-11-18
+
+### English
+
+#### Fixes
+- **Playlists also show YouTube Music songs that are not in your library** (added from search, radio or For you),
+  with their source in All sources. Their title, artist and cover are kept between sessions; before, only songs in
+  the queue kept them.
+- **Remove from playlist** removes the right song. Before, it could remove a different one when the playlist had
+  hidden songs.
+- **A damaged `music.toml` is set aside** as `music.toml.danado-<date>` instead of being overwritten with the
+  defaults on close, which lost the servers, the queue and the settings.
+
+### Español
+
+#### Correcciones
+- **Las listas también muestran las canciones de YouTube Music que no están en tu biblioteca** (agregadas desde la
+  búsqueda, la radio o Para ti), con su origen en Todos los orígenes. Su título, artista y carátula se guardan entre
+  sesiones; antes solo los guardaban las de la cola.
+- **Quitar de la lista** quita la canción correcta. Antes podía quitar otra cuando la lista tenía canciones ocultas.
+- **Un `music.toml` dañado se aparta** como `music.toml.danado-<fecha>` en vez de pisarse con los valores de fábrica
+  al cerrar, lo que hacía perder los servidores, la cola y los ajustes.
+
 ## [1.1.0] - 2026-11-17
 
 ### English
