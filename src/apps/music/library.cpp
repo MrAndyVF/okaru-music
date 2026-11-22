@@ -261,6 +261,17 @@ namespace okaru::music {
     return std::ranges::contains(kAudioExtensions, ext);
   }
 
+  // Una carátula que ya no está en la caché cuenta como ausente: así se vuelve a extraer o descargar.
+  std::vector<Track> withoutMissingCovers(std::vector<Track> tracks) {
+    std::error_code ec;
+    for (Track& t : tracks) {
+      if (!t.cover.empty() && !fs::exists(t.cover, ec)) {
+        t.cover.clear();
+      }
+    }
+    return tracks;
+  }
+
   Model organize(std::vector<Track> tracks) {
     Model model;
     // Claves de orden calculadas una vez (fold es lo caro).
@@ -605,7 +616,10 @@ namespace okaru::music {
     if (!openDb(db, m_dbPath)) {
       return {};
     }
-    return organize(readAll(db.handle));
+    // Si la caché de carátulas se borró por fuera, se recrea y las que faltan se vuelven a buscar (escaneo/descarga).
+    std::error_code ec;
+    fs::create_directories(m_coversDir, ec);
+    return organize(withoutMissingCovers(readAll(db.handle)));
   }
 
   void Library::scan(std::vector<fs::path> folders, SourceOrder covers, ProgressFn progress, DoneFn done) {
@@ -702,7 +716,9 @@ namespace okaru::music {
     std::unordered_map<std::string, std::pair<std::int64_t, std::int64_t>> known; // ruta → (mtime, tamaño)
     for (auto& t : readAll(db.handle)) {
       // Las de los servidores no son de las carpetas: las maneja su sincronización.
-      if (t.path.starts_with('/')) {
+      // Las de carátula perdida no cuentan como conocidas: se vuelven a leer para recuperarla.
+      std::error_code missing;
+      if (t.path.starts_with('/') && (t.cover.empty() || fs::exists(t.cover, missing))) {
         known.emplace(std::move(t.path), std::pair{t.mtime, t.size});
       }
     }
@@ -799,7 +815,7 @@ namespace okaru::music {
     }
     db.exec("COMMIT");
     kLog.info("scan: {} files, {} read", counts.scanned, counts.updated);
-    finish(organize(readAll(db.handle)));
+    finish(organize(withoutMissingCovers(readAll(db.handle))));
   }
 
   std::vector<Rgb> dominantColors(const std::vector<std::uint8_t>& rgba, std::size_t count) {

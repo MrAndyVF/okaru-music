@@ -503,6 +503,19 @@ namespace {
     const Model synced = library.load();
     assert(synced.tracks.size() == 2);
     assert(std::ranges::any_of(synced.tracks, [](const Track& t) { return t.path == "jf://ab12/al1/it2"; }));
+    // Carátulas borradas por fuera: la carpeta se recrea y la canción queda sin carátula para volver a buscarla.
+    fs::create_directories(root / "covers");
+    std::ofstream(root / "covers" / "it3.jpg") << "jpg";
+    remote.path = "jf://ab12/al1/it3";
+    remote.cover = (root / "covers" / "it3.jpg").string();
+    library.replaceRemote("jf://ab12/", {remote});
+    const auto coverOf = [&] {
+      const Model m = library.load();
+      return std::ranges::find_if(m.tracks, [](const Track& t) { return t.path == "jf://ab12/al1/it3"; })->cover;
+    };
+    assert(!coverOf().empty());
+    fs::remove_all(root / "covers");
+    assert(coverOf().empty() && fs::is_directory(root / "covers"));
     library.replaceRemote("jf://ab12/", {});
     // Sin la carpeta en la lista, sus canciones salen de la biblioteca.
     assert(runScan({}).tracks.empty());
