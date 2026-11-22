@@ -2,6 +2,24 @@
 
 Each version has an English and a Spanish section. / Cada versión tiene una sección en inglés y otra en español.
 
+## [1.1.3] - 2026-11-22
+
+### English
+
+#### Fixes
+- **Covers come back when the cover cache is deleted.** If `~/.cache/okaru/music/covers` disappeared, Valandy kept
+  pointing at the missing files and could not download new ones; it now recreates the folder and reads again the
+  songs whose cover is gone (local covers are extracted again, online ones downloaded again). Released with OKARU
+  1.3.9.
+
+### Español
+
+#### Correcciones
+- **Las carátulas vuelven si se borra su caché.** Si desaparecía `~/.cache/okaru/music/covers`, Valandy seguía
+  apuntando a los archivos que faltaban y no podía descargar otros; ahora recrea la carpeta y vuelve a leer las
+  canciones cuya carátula ya no está (las locales se extraen de nuevo y las de internet se descargan otra vez). Sale
+  con OKARU 1.3.9.
+
 ## [1.1.2] - 2026-11-22
 
 ### English
