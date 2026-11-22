@@ -1,6 +1,6 @@
 # okaru-music: compila la rama main del checkout (OKARU_MUSIC_REPO, por defecto ~/Projects/okaru-project/okaru-music).
 pkgname=okaru-music
-pkgver=1.1.1
+pkgver=1.1.2
 pkgrel=1
 pkgdesc='OKARU (郁): Valandy, el reproductor de música'
 arch=(x86_64)
