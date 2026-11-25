@@ -4351,6 +4351,8 @@ namespace okaru::music {
         .gap = Style::spaceMd * scale,
         .padding = Style::spaceLg * scale,
         .fill = colorSpecFromRole(ColorRole::SurfaceContainerHigh),
+        .border = colorSpecFromRole(ColorRole::Primary), // OKARU: como los paneles
+        .borderWidth = Style::borderWidth,
         .width = cardWidth,
     });
     if (m_dialog == Dialog::AddServer || m_dialog == Dialog::YouTubeLogin) {
