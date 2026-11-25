@@ -2,6 +2,27 @@
 
 Each version has an English and a Spanish section. / Cada versión tiene una sección en inglés y otra en español.
 
+## [1.1.4] - 2026-11-25
+
+### English
+
+#### Changes
+- Sidebar rows (sections, playlists, settings) are taller and airier, like the Settings modules.
+- Dialog cards get a 2 px accent border, like OKARU panels; menus follow the system border width.
+- Released with OKARU 1.4.0, which brings square controls and 2 px borders to every app.
+- CI: an optional `.okaru-core-ref` file builds the app against an unpublished okaru-core (branch, tag or commit).
+
+### Español
+
+#### Cambios
+- Las filas de la barra lateral (secciones, playlists, ajustes) son más altas y con más aire, como los módulos de
+  Ajustes.
+- Las tarjetas de diálogo llevan un borde de acento de 2 px, como los paneles de OKARU; los menús siguen el grosor de
+  borde del sistema.
+- Sale con OKARU 1.4.0, que trae controles cuadrados y bordes de 2 px a todas las apps.
+- CI: un archivo `.okaru-core-ref` opcional compila la app contra un okaru-core sin publicar (rama, etiqueta o
+  commit).
+
 ## [1.1.3] - 2026-11-22
 
 ### English
