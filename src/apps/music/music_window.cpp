@@ -1624,9 +1624,13 @@ namespace okaru::music {
   }
 
   std::unique_ptr<Node> MusicWindow::buildSidebar(float height, float scale) {
+    // Filas altas y con aire, como los módulos de Ajustes (OKARU 2026-11).
+    const float rowHeight = 42.0F * scale;
+    const float rowGlyph = 18.0F * scale;
+    const float rowInset = 10.0F * scale;
     auto side = ui::column({
         .align = FlexAlign::Stretch,
-        .gap = 2.0F * scale,
+        .gap = 4.0F * scale,
         .padding = Style::spaceSm * scale,
         .fill = colorSpecFromRole(ColorRole::SurfaceContainerLow),
         .width = (m_rail ? kRailWidth : kSidebarWidth) * scale,
@@ -1637,10 +1641,14 @@ namespace okaru::music {
       return ui::button({
           .text = m_rail ? std::optional<std::string>{} : std::optional<std::string>{tr(key)},
           .glyph = glyph,
+          .glyphSize = rowGlyph,
+          .controlHeight = rowHeight,
           .selected = active,
           .contentAlign = m_rail ? ButtonContentAlign::Center : ButtonContentAlign::Start,
           .variant = active ? ButtonVariant::Secondary : ButtonVariant::Ghost,
           .tooltip = m_rail ? std::optional<std::string>{tr(key)} : std::nullopt,
+          .paddingH = rowInset,
+          .gap = rowInset,
           .onClick = std::move(onClick),
       });
     };
@@ -1694,7 +1702,7 @@ namespace okaru::music {
       }));
     }
     auto lists = ui::scrollView({.contentScale = scale, .flexGrow = 1.0F});
-    auto column = ui::column({.align = FlexAlign::Stretch, .gap = 2.0F * scale, .width = (m_rail ? kRailWidth : kSidebarWidth) * scale - Style::spaceSm * 2.0F * scale});
+    auto column = ui::column({.align = FlexAlign::Stretch, .gap = 4.0F * scale, .width = (m_rail ? kRailWidth : kSidebarWidth) * scale - Style::spaceSm * 2.0F * scale});
     for (const Playlist& list : m_playlists.all()) {
       if (!showsPlaylist(list)) {
         continue;
@@ -1704,10 +1712,14 @@ namespace okaru::music {
       column->addChild(ui::button({
           .text = m_rail ? std::optional<std::string>{} : std::optional<std::string>{name},
           .glyph = list.favorites ? "heart" : "playlist",
+          .glyphSize = rowGlyph,
+          .controlHeight = rowHeight,
           .selected = active,
           .contentAlign = m_rail ? ButtonContentAlign::Center : ButtonContentAlign::Start,
           .variant = active ? ButtonVariant::Secondary : ButtonVariant::Ghost,
           .tooltip = name,
+          .paddingH = rowInset,
+          .gap = rowInset,
           .onClick = [this, id = list.id] { openPlaylist(id); },
       }));
     }
