@@ -4292,7 +4292,7 @@ namespace okaru::music {
     layer->addChild(ui::box({
         .fill = colorSpecFromRole(ColorRole::SurfaceContainerHigh),
         .border = colorSpecFromRole(ColorRole::OutlineVariant),
-        .borderWidth = 1.0F,
+        .borderWidth = Style::borderWidth,
         .width = menuWidth,
         .height = menuHeight,
         .configure = [x, y](Box& box) { box.setPosition(x, y); },
